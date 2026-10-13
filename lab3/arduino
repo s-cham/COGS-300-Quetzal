@@ -1,0 +1,185 @@
+
+/*
+  COGS 300 - Lab 03: Build Your Own Bot
+  Arduino Uno + L298N + two DC motors
+
+  Serial Monitor commands:
+  f = forward
+  b = backward
+  l = turn left while moving
+  r = turn right while moving
+  q = spin left in place
+  e = spin right in place
+  s = stop
+  + = increase speed
+  - = decrease speed
+*/
+
+// Motor A: left motor
+const int enA = 5; 
+const int in1 = 6;
+const int in2 = 7;
+
+// Motor B: right motor
+const int enB = 9;
+const int in3 = 11;
+const int in4 = 10;
+
+// Motor speed ranges from 0 to 255
+int speedValue = 255;
+
+// Minimum speed change for each + or - command
+const int speedStep = 15;
+
+
+// Set up the Arduino pins and Serial Monitor
+void setup() {
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+
+  stopMotors();
+
+  Serial.begin(9600);
+
+  Serial.println("Robot motor controller ready!");
+  Serial.println("f=forward, b=backward");
+  Serial.println("l=left, r=right");
+  Serial.println("q=spin left, e=spin right");
+  Serial.println("s=stop, +=faster, -=slower");
+}
+
+
+// Control one motor.
+// Positive speed = one direction.
+// Negative speed = the opposite direction.
+// Zero speed = stop.
+void setMotor(int enablePin, int directionPin1,
+              int directionPin2, int motorSpeed) {
+
+  // Keep the speed within -255 to 255
+  motorSpeed = constrain(motorSpeed, -255, 255);
+
+  // Reverse Motor A because it is mounted in the opposite orientation
+  if (enablePin == enA) {
+    motorSpeed = motorSpeed;
+  }
+
+  if (motorSpeed > 0) {
+    digitalWrite(directionPin1, HIGH);
+    digitalWrite(directionPin2, LOW);
+  }
+  else if (motorSpeed < 0) {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, HIGH);
+  }
+  else {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, LOW);
+  }
+
+  // PWM controls speed
+  analogWrite(enablePin, abs(motorSpeed));
+}
+
+
+// Set the left and right motor speeds independently.
+// Positive = forward; negative = backward.
+void drive(int leftSpeed, int rightSpeed) {
+  setMotor(enA, in1, in2, leftSpeed);
+  setMotor(enB, in3, in4, rightSpeed);
+}
+
+
+// High-level movement functions
+void forward() {
+  drive(speedValue, speedValue);
+}
+
+void backward() {
+  drive(-speedValue, -speedValue);
+}
+
+void turnLeft() {
+  // Left motor slower than right motor
+  drive(speedValue / 3, speedValue);
+}
+
+void turnRight() {
+  // Right motor slower than left motor
+  drive(speedValue, speedValue / 3);
+}
+
+void spinLeft() {
+  // Wheels rotate in opposite directions
+  drive(-speedValue, speedValue);
+}
+
+void spinRight() {
+  drive(speedValue, -speedValue);
+}
+
+void stopMotors() {
+  drive(0, 0);
+}
+
+
+// Read commands from the Serial Monitor
+void loop() {
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+
+    switch (command) {
+      case 'f':
+        forward();
+        Serial.println("Forward");
+        break;
+
+      case 'b':
+        backward();
+        Serial.println("Backward");
+        break;
+
+      case 'l':
+        turnLeft();
+        Serial.println("Turning left");
+        break;
+
+      case 'r':
+        turnRight();
+        Serial.println("Turning right");
+        break;
+
+      case 'q':
+        spinLeft();
+        Serial.println("Spinning left");
+        break;
+
+      case 'e':
+        spinRight();
+        Serial.println("Spinning right");
+        break;
+
+      case 's':
+        stopMotors();
+        Serial.println("Stopped");
+        break;
+
+      case '+':
+        speedValue = min(255, speedValue + speedStep);
+        Serial.print("Speed: ");
+        Serial.println(speedValue);
+        break;
+
+      case '-':
+        speedValue = max(0, speedValue - speedStep);
+        Serial.print("Speed: ");
+        Serial.println(speedValue);
+        break;
+    }
+  }
+}
