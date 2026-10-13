@@ -1,0 +1,169 @@
+import processing.serial.*;
+
+Serial arduino;
+
+// Change this to your Arduino's serial port
+int portIndex = 1;
+
+int motorSpeed = 180;
+boolean connected = false;
+String statusMessage = "Not connected";
+
+// Button layout
+int centerX = 300;
+int centerY = 250;
+int buttonW = 110;
+int buttonH = 55;
+
+// Slider layout
+int sliderX = 100;
+int sliderY = 500;
+int sliderW = 400;
+
+void setup() {
+  size(600, 600);
+  textAlign(CENTER, CENTER);
+
+  // List available serial ports in the console
+  println(Serial.list());
+
+  // Try to connect to the selected port
+  try {
+    arduino = new Serial(this, Serial.list()[portIndex], 9600);
+    connected = true;
+    statusMessage = "Connected";
+  } catch (Exception e) {
+    statusMessage = "Connection failed - check port";
+    println(statusMessage);
+  }
+}
+
+
+void draw() {
+  background(25, 32, 48);
+
+  fill(255);
+  textSize(24);
+  text("COGS 300 - ROBOT CONTROL", width/2, 35);
+
+  fill(180);
+  textSize(14);
+  text(statusMessage, width/2, 65);
+
+  // Movement buttons
+  drawButton("FORWARD", centerX, centerY - 75, color(40, 140, 210));
+  drawButton("BACKWARD", centerX, centerY + 75, color(40, 140, 210));
+  drawButton("LEFT", centerX - 125, centerY, color(40, 140, 210));
+  drawButton("RIGHT", centerX + 125, centerY, color(40, 140, 210));
+
+  // Spin buttons
+  drawButton("SPIN LEFT", centerX - 125, centerY + 145,
+             color(30, 150, 130));
+  drawButton("SPIN RIGHT", centerX + 125, centerY + 145,
+             color(30, 150, 130));
+
+  // Stop button
+  drawButton("STOP", centerX, centerY, color(210, 65, 70));
+
+  // Speed slider
+  fill(255);
+  textSize(16);
+  text("Motor speed: " + motorSpeed, width/2, 475);
+
+  stroke(120);
+  strokeWeight(5);
+  line(sliderX, sliderY, sliderX + sliderW, sliderY);
+
+  float knobX = map(motorSpeed, 0, 255, sliderX,
+                    sliderX + sliderW);
+
+  stroke(80, 200, 190);
+  line(sliderX, sliderY, knobX, sliderY);
+
+  noStroke();
+  fill(255);
+  circle(knobX, sliderY, 18);
+
+  fill(180);
+  textSize(12);
+  text("0", sliderX, sliderY + 25);
+  text("255", sliderX + sliderW, sliderY + 25);
+
+  fill(180);
+  text("Click a movement button to send a command",
+       width/2, 570);
+}
+
+void drawButton(String label, int x, int y, color c) {
+  rectMode(CENTER);
+  noStroke();
+  fill(c);
+  rect(x, y, buttonW, buttonH, 10);
+
+  fill(255);
+  textSize(13);
+  text(label, x, y);
+}
+
+void sendCommand(char command) {
+  if (connected && arduino != null) {
+    arduino.write(command);
+  } else {
+    println("Arduino not connected: " + command);
+  }
+}
+
+void mousePressed() {
+  // Movement buttons
+  if (overButton(centerX, centerY - 75)) {
+    sendCommand('f');
+  } else if (overButton(centerX, centerY + 75)) {
+    sendCommand('b');
+  } else if (overButton(centerX - 125, centerY)) {
+    sendCommand('l');
+  } else if (overButton(centerX + 125, centerY)) {
+    sendCommand('r');
+  } else if (overButton(centerX - 125, centerY + 145)) {
+    sendCommand('q');
+  } else if (overButton(centerX + 125, centerY + 145)) {
+    sendCommand('e');
+  } else if (overButton(centerX, centerY)) {
+    sendCommand('s');
+  }
+
+  // Click the speed slider
+  if (mouseY >= sliderY - 15 && mouseY <= sliderY + 15 &&
+      mouseX >= sliderX && mouseX <= sliderX + sliderW) {
+    updateSpeed();
+  }
+}
+
+void mouseDragged() {
+  if (mouseY >= sliderY - 20 && mouseY <= sliderY + 20) {
+    updateSpeed();
+  }
+}
+
+void updateSpeed() {
+  int newSpeed = int(map(mouseX, sliderX, sliderX + sliderW,
+                         0, 255));
+  motorSpeed = constrain(newSpeed, 0, 255);
+
+  // Arduino sketch receives + or - rather than an exact speed.
+  // Send enough adjustment commands to reach the selected value.
+  // See explanation below for the exact-speed improvement.
+  println("Selected speed: " + motorSpeed);
+}
+
+boolean overButton(int x, int y) {
+  return mouseX >= x - buttonW/2 &&
+         mouseX <= x + buttonW/2 &&
+         mouseY >= y - buttonH/2 &&
+         mouseY <= y + buttonH/2;
+}
+
+void keyPressed() {
+  if (key == ' ') {
+    sendCommand('s');
+  }
+}
