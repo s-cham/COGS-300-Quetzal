@@ -1,0 +1,297 @@
+
+/*
+  COGS 300 - Lab 03: Build Your Own Bot
+  Arduino Uno + L298N + two DC motors + HC-SR04
+
+  Manual commands:
+  f = forward
+  b = backward
+  l = turn left
+  r = turn right
+  q = spin left
+  e = spin right
+  s = stop
+  + = increase manual speed
+  - = decrease manual speed
+  m = toggle Follow Me mode
+*/
+
+// Motor A: left motor
+const int enA = 5;
+const int in1 = 6;
+const int in2 = 7;
+
+// Motor B: right motor
+const int enB = 9;
+const int in3 = 11;
+const int in4 = 10;
+
+// Ultrasonic sensor
+const int trigPin = 2;
+const int echoPin = 3;
+
+// Manual driving settings
+int speedValue = 255;
+const int speedStep = 15;
+
+// Follow Me settings
+const float setPoint = 25.0;  // Target distance in cm
+const float Kp = 5.0;          // Proportional gain
+const float deadband = 2.0;    // Stop within 2 cm of target
+const int minFollowSpeed = 65; // Help motors overcome friction
+const int maxFollowSpeed = 180;
+
+bool followMode = false;
+
+// --------------------------------------------------
+// Setup
+// --------------------------------------------------
+
+void setup() {
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  Serial.begin(9600);
+
+  stopMotors();
+
+  Serial.println("Robot motor controller ready!");
+  Serial.println("f/b = forward/backward");
+  Serial.println("l/r = turn left/right");
+  Serial.println("q/e = spin left/right");
+  Serial.println("s = stop, +/- = manual speed");
+  Serial.println("m = toggle Follow Me mode");
+}
+
+// --------------------------------------------------
+// Motor control
+// Positive speed = forward; negative = backward
+// --------------------------------------------------
+
+void setMotor(int enablePin, int directionPin1,
+              int directionPin2, int motorSpeed) {
+
+  motorSpeed = constrain(motorSpeed, -255, 255);
+
+  if (motorSpeed > 0) {
+    digitalWrite(directionPin1, HIGH);
+    digitalWrite(directionPin2, LOW);
+  }
+  else if (motorSpeed < 0) {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, HIGH);
+  }
+  else {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, LOW);
+  }
+
+  analogWrite(enablePin, abs(motorSpeed));
+}
+
+void drive(int leftSpeed, int rightSpeed) {
+  setMotor(enA, in1, in2, leftSpeed);
+  setMotor(enB, in3, in4, rightSpeed);
+}
+
+void forward() {
+  drive(speedValue, speedValue);
+}
+
+void backward() {
+  drive(-speedValue, -speedValue);
+}
+
+void turnLeft() {
+  drive(speedValue / 3, speedValue);
+}
+
+void turnRight() {
+  drive(speedValue, speedValue / 3);
+}
+
+void spinLeft() {
+  drive(-speedValue, speedValue);
+}
+
+void spinRight() {
+  drive(speedValue, -speedValue);
+}
+
+void stopMotors() {
+  drive(0, 0);
+}
+
+// --------------------------------------------------
+// Measure distance using HC-SR04
+// Returns -1 if no valid echo is received
+// --------------------------------------------------
+
+float readDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Timeout prevents waiting too long for an echo
+  unsigned long duration = pulseIn(echoPin, HIGH, 30000UL);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2.0;
+
+  // Reject readings outside a practical sensor range
+  if (distance < 2 || distance > 350) {
+    return -1;
+  }
+
+  return distance;
+}
+
+// --------------------------------------------------
+// P controller for Follow Me mode
+// --------------------------------------------------
+
+void followMe() {
+  float distance = readDistance();
+
+  // Stop if the sensor cannot detect the target
+  if (distance < 0) {
+    stopMotors();
+    Serial.println("No valid echo - stopped");
+    return;
+  }
+
+  // Positive error means the target is too far away
+  // Negative error means the target is too close
+  float error = distance - setPoint;
+
+  // Stop near the set point to reduce oscillation
+  if (abs(error) <= deadband) {
+    stopMotors();
+  }
+  else {
+    // Proportional control: output = Kp * error
+    int output = (int)(Kp * error);
+
+    // Map the output to a usable motor PWM range
+    output = constrain(
+      output, -maxFollowSpeed, maxFollowSpeed
+    );
+
+    // Account for motors that may not move at low PWM
+    if (output > 0 && output < minFollowSpeed) {
+      output = minFollowSpeed;
+    }
+    else if (output < 0 && output > -minFollowSpeed) {
+      output = -minFollowSpeed;
+    }
+
+    // Same command to both motors keeps travel straight
+    drive(output, output);
+  }
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.print(" cm | Error: ");
+  Serial.print(error);
+  Serial.print(" cm | Follow mode: ");
+  Serial.println(followMode ? "ON" : "OFF");
+}
+
+// --------------------------------------------------
+// Serial commands
+// --------------------------------------------------
+
+void loop() {
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+
+    // Ignore Serial Monitor line endings
+    if (command == '\n' || command == '\r') {
+      // Do nothing
+    }
+    else if (command == 'm') {
+      followMode = !followMode;
+
+      if (followMode) {
+        Serial.println("Follow Me mode ON");
+      }
+      else {
+        stopMotors();
+        Serial.println("Follow Me mode OFF");
+      }
+    }
+    else {
+      // Manual commands override autonomous driving
+      followMode = false;
+
+      switch (command) {
+        case 'f':
+          forward();
+          Serial.println("Forward");
+          break;
+
+        case 'b':
+          backward();
+          Serial.println("Backward");
+          break;
+
+        case 'l':
+          turnLeft();
+          Serial.println("Turning left");
+          break;
+
+        case 'r':
+          turnRight();
+          Serial.println("Turning right");
+          break;
+
+        case 'q':
+          spinLeft();
+          Serial.println("Spinning left");
+          break;
+
+        case 'e':
+          spinRight();
+          Serial.println("Spinning right");
+          break;
+
+        case 's':
+          stopMotors();
+          Serial.println("Stopped");
+          break;
+
+        case '+':
+          speedValue = min(255, speedValue + speedStep);
+          Serial.print("Manual speed: ");
+          Serial.println(speedValue);
+          break;
+
+        case '-':
+          speedValue = max(0, speedValue - speedStep);
+          Serial.print("Manual speed: ");
+          Serial.println(speedValue);
+          break;
+      }
+    }
+  }
+
+  // Continuously update the P controller
+  if (followMode) {
+    followMe();
+    delay(50);
+  }
+}
