@@ -1,0 +1,469 @@
+
+ /*
+  COGS 300 - Lab 05: Follow Me + Wall Following
+
+  FRONT ultrasonic sensor:
+    TRIG = 2
+    ECHO = 3
+
+  LEFT ultrasonic sensor:
+    TRIG = 4
+    ECHO = 8
+
+  Serial commands:
+    w = Toggle Follow Me mode
+    a = Toggle Wall Follow mode
+
+    f = Forward
+    b = Backward
+    l = Turn left
+    r = Turn right
+    q = Spin left
+    e = Spin right
+    s = Stop
+    + = Increase manual speed
+    - = Decrease manual speed
+*/
+
+// =========================
+// MOTOR PINS
+// =========================
+
+const int enA = 5;
+const int in1 = 6;
+const int in2 = 7;
+
+const int enB = 9;
+const int in3 = 11;
+const int in4 = 10;
+
+
+// =========================
+// ULTRASONIC SENSOR PINS
+// =========================
+
+const int frontTrigPin = 12;
+const int frontEchoPin = 13;
+
+const int leftTrigPin = 3;
+const int leftEchoPin = 4;
+
+
+// =========================
+// FOLLOW ME SETTINGS
+// =========================
+
+const float followSetPoint = 25.0;
+const float followKp = 5.0;
+const float followDeadband = 2.0;
+
+
+// =========================
+// WALL FOLLOW SETTINGS
+// =========================
+
+const float wallSetPoint = 20.0;
+const float wallKp = 5.0;
+const float wallDeadband = 2.0;
+
+const int baseSpeed = 120;
+const int maxCorrection = 80;
+
+const float frontStopDistance = 15.0;
+
+
+// =========================
+// MANUAL CONTROL
+// =========================
+
+int speedValue = 150;
+const int speedStep = 15;
+
+
+// =========================
+// ROBOT MODE
+// =========================
+
+// 0 = Manual
+// 1 = Follow Me
+// 2 = Wall Follow
+
+int robotMode = 0;
+
+unsigned long lastPrintTime = 0;
+
+
+// =========================
+// SETUP
+// =========================
+
+void setup() {
+
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+
+  pinMode(frontTrigPin, OUTPUT);
+  pinMode(frontEchoPin, INPUT);
+
+  pinMode(leftTrigPin, OUTPUT);
+  pinMode(leftEchoPin, INPUT);
+
+  Serial.begin(9600);
+
+  stopMotors();
+
+  Serial.println("Lab 05 Robot Ready!");
+  Serial.println("w = Follow Me mode");
+  Serial.println("a = Wall Follow mode");
+  Serial.println("s = Stop");
+}
+
+
+// =========================
+// MOTOR CONTROL
+// =========================
+
+void setMotor(int enablePin,
+              int directionPin1,
+              int directionPin2,
+              int motorSpeed) {
+
+  motorSpeed = constrain(motorSpeed, -255, 255);
+
+  if (motorSpeed > 0) {
+    digitalWrite(directionPin1, HIGH);
+    digitalWrite(directionPin2, LOW);
+  }
+  else if (motorSpeed < 0) {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, HIGH);
+  }
+  else {
+    digitalWrite(directionPin1, LOW);
+    digitalWrite(directionPin2, LOW);
+  }
+
+  analogWrite(enablePin, abs(motorSpeed));
+}
+
+
+void drive(int leftSpeed, int rightSpeed) {
+
+  setMotor(enA, in1, in2, leftSpeed);
+  setMotor(enB, in3, in4, rightSpeed);
+}
+
+
+void stopMotors() {
+  drive(0, 0);
+}
+
+
+// =========================
+// MANUAL MOVEMENT
+// =========================
+
+void forward() {
+  drive(speedValue, speedValue);
+}
+
+void backward() {
+  drive(-speedValue, -speedValue);
+}
+
+void turnLeft() {
+  drive(speedValue / 3, speedValue);
+}
+
+void turnRight() {
+  drive(speedValue, speedValue / 3);
+}
+
+void spinLeft() {
+  drive(-speedValue, speedValue);
+}
+
+void spinRight() {
+  drive(speedValue, -speedValue);
+}
+
+
+// =========================
+// ULTRASONIC DISTANCE
+// =========================
+
+float readDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration =
+    pulseIn(echoPin, HIGH, 25000UL);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance =
+    duration * 0.0343 / 2.0;
+
+  if (distance < 2 || distance > 350) {
+    return -1;
+  }
+
+  return distance;
+}
+
+
+// =========================
+// FOLLOW ME MODE
+// Uses FRONT sensor
+// =========================
+
+void followMe(float frontDistance) {
+
+  if (frontDistance < 0) {
+    stopMotors();
+    Serial.println("Follow Me: No front reading - STOP");
+    return;
+  }
+
+  // P-controller
+  float error = frontDistance - followSetPoint;
+
+  float output = followKp * error;
+
+  // Stop when close enough to target distance
+  if (error > -followDeadband &&
+      error < followDeadband) {
+    output = 0;
+  }
+
+  // Map output to motor controller range
+  output = constrain(output, -255, 255);
+
+  // Same speed on both motors = straight line
+  drive((int)output, (int)output);
+}
+
+
+// =========================
+// WALL FOLLOW MODE
+// Uses LEFT sensor
+// =========================
+
+void wallFollow(float leftDistance,
+                float frontDistance) {
+
+  if (leftDistance < 0) {
+    stopMotors();
+    Serial.println("Wall Follow: No left reading - STOP");
+    return;
+  }
+
+  // Stop if there is an obstacle directly ahead
+  if (frontDistance > 0 &&
+      frontDistance < frontStopDistance) {
+
+    stopMotors();
+    Serial.println("Obstacle ahead - STOP");
+    return;
+  }
+
+  // P-controller for distance from wall
+  float error = leftDistance - wallSetPoint;
+
+  float correction = wallKp * error;
+
+  correction = constrain(
+    correction,
+    -maxCorrection,
+    maxCorrection
+  );
+
+  if (error > -wallDeadband &&
+      error < wallDeadband) {
+    correction = 0;
+  }
+
+  // Adjust motor speeds to steer toward/away from wall
+  int leftSpeed = baseSpeed - correction;
+  int rightSpeed = baseSpeed + correction;
+
+  leftSpeed = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
+
+  drive(leftSpeed, rightSpeed);
+}
+
+
+// =========================
+// SERIAL COMMANDS
+// =========================
+
+void handleCommand(char command) {
+
+  if (command == '\n' || command == '\r') {
+    return;
+  }
+
+  if (command == 'w') {
+
+    if (robotMode == 1) {
+      robotMode = 0;
+      stopMotors();
+      Serial.println("Follow Me OFF");
+    }
+    else {
+      robotMode = 1;
+      stopMotors();
+      Serial.println("Follow Me ON");
+    }
+
+    return;
+  }
+
+  if (command == 'a') {
+
+    if (robotMode == 2) {
+      robotMode = 0;
+      stopMotors();
+      Serial.println("Wall Follow OFF");
+    }
+    else {
+      robotMode = 2;
+      stopMotors();
+      Serial.println("Wall Follow ON");
+    }
+
+    return;
+  }
+
+  // Any manual command exits autonomous mode
+  robotMode = 0;
+
+  switch (command) {
+
+    case 'f':
+      forward();
+      Serial.println("Forward");
+      break;
+
+    case 'b':
+      backward();
+      Serial.println("Backward");
+      break;
+
+    case 'l':
+      turnLeft();
+      Serial.println("Turning left");
+      break;
+
+    case 'r':
+      turnRight();
+      Serial.println("Turning right");
+      break;
+
+    case 'q':
+      spinLeft();
+      Serial.println("Spinning left");
+      break;
+
+    case 'e':
+      spinRight();
+      Serial.println("Spinning right");
+      break;
+
+    case 's':
+      stopMotors();
+      Serial.println("Stopped");
+      break;
+
+    case '+':
+      speedValue = min(255, speedValue + speedStep);
+      Serial.print("Manual speed: ");
+      Serial.println(speedValue);
+      break;
+
+    case '-':
+      speedValue = max(0, speedValue - speedStep);
+      Serial.print("Manual speed: ");
+      Serial.println(speedValue);
+      break;
+  }
+}
+
+
+// =========================
+// MAIN LOOP
+// =========================
+
+void loop() {
+
+  // Check for serial commands
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+    handleCommand(command);
+  }
+
+  // Read both sensors
+  float frontDistance =
+    readDistance(frontTrigPin, frontEchoPin);
+
+  // Small pause to reduce ultrasonic interference
+  delay(30);
+
+  float leftDistance =
+    readDistance(leftTrigPin, leftEchoPin);
+
+
+  // Run selected autonomous mode
+  if (robotMode == 1) {
+    followMe(frontDistance);
+  }
+
+  else if (robotMode == 2) {
+    wallFollow(leftDistance, frontDistance);
+  }
+
+
+  // Print both sensor readings periodically
+  if (millis() - lastPrintTime >= 200) {
+
+    Serial.print("Front: ");
+
+    if (frontDistance < 0) {
+      Serial.print("Invalid");
+    }
+    else {
+      Serial.print(frontDistance);
+      Serial.print(" cm");
+    }
+
+    Serial.print(" | Left: ");
+
+    if (leftDistance < 0) {
+      Serial.print("Invalid");
+    }
+    else {
+      Serial.print(leftDistance);
+      Serial.print(" cm");
+    }
+
+    Serial.println();
+
+    lastPrintTime = millis();
+  }
+
+  delay(50);
+}
