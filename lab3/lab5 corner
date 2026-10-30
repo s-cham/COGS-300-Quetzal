@@ -1,0 +1,167 @@
+
+const int IN1 = 6;
+const int IN2 = 7;
+const int IN3 = 11;
+const int IN4 = 10;
+
+const int frontTrig = 12;
+const int frontEcho = 13;
+const int sideTrig = 3;
+const int sideEcho = 4;
+
+const int ENA = 5;
+const int ENB = 9;
+
+// Wall following settings
+const float targetDistance = 25.0;
+const float Kp = 2.5;
+
+const int baseSpeed = 170;
+const int minSpeed = 115;
+const int maxSpeed = 225;
+
+// Set true if the wall is on the RIGHT
+// Set false if the wall is on the LEFT
+const bool wallOnRight = true;
+
+// Set false if ENA controls the right wheel
+const bool enaIsLeft = true;
+
+float filteredSide = 25.0;
+bool firstReading = true;
+
+float readDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+  long duration = pulseIn(echo, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  return duration * 0.0343 / 2.0;
+}
+
+void motors(int leftSpeed, int rightSpeed) {
+  leftSpeed = constrain(leftSpeed, -255, 255);
+  rightSpeed = constrain(rightSpeed, -255, 255);
+
+  int speedA = enaIsLeft ? leftSpeed : rightSpeed;
+  int speedB = enaIsLeft ? rightSpeed : leftSpeed;
+
+  digitalWrite(IN1, speedA > 0 ? HIGH : LOW);
+  digitalWrite(IN2, speedA < 0 ? HIGH : LOW);
+
+  digitalWrite(IN3, speedB > 0 ? HIGH : LOW);
+  digitalWrite(IN4, speedB < 0 ? HIGH : LOW);
+
+  analogWrite(ENA, abs(speedA));
+  analogWrite(ENB, abs(speedB));
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  motors(0, 0);
+}
+
+void loop() {
+  float front = readDistance(frontTrig, frontEcho);
+
+  delay(60);
+
+  float side = readDistance(sideTrig, sideEcho);
+
+  Serial.print("Front: ");
+  Serial.print(front);
+  Serial.print(" | Side: ");
+  Serial.println(side);
+
+  // Stop if front reading is invalid
+  if (front < 2 || front > 350) {
+    motors(0, 0);
+    delay(100);
+    return;
+  }
+
+  // Avoid front obstacles first
+  if (front < 15) {
+    if (wallOnRight) {
+      motors(-150, 150);
+    } else {
+      motors(150, -150);
+    }
+
+    delay(100);
+    return;
+  }
+
+  // Stop if side reading is invalid
+  if (side < 2 || side > 150) {
+    motors(0, 0);
+    delay(100);
+    return;
+  }
+
+  // Smooth side sensor measurements
+  if (firstReading) {
+    filteredSide = side;
+    firstReading = false;
+  } else {
+    filteredSide =
+      0.6 * filteredSide + 0.4 * side;
+  }
+
+  float error = filteredSide - targetDistance;
+
+  // P-controller
+  float correction = Kp * error;
+
+  correction = constrain(correction, -55, 55);
+
+  int leftSpeed;
+  int rightSpeed;
+
+  if (wallOnRight) {
+    leftSpeed = baseSpeed + correction;
+    rightSpeed = baseSpeed - correction;
+  } else {
+    leftSpeed = baseSpeed - correction;
+    rightSpeed = baseSpeed + correction;
+  }
+
+  leftSpeed = constrain(
+    leftSpeed, minSpeed, maxSpeed
+  );
+
+  rightSpeed = constrain(
+    rightSpeed, minSpeed, maxSpeed
+  );
+
+  motors(leftSpeed, rightSpeed);
+
+  Serial.print("Left PWM: ");
+  Serial.print(leftSpeed);
+  Serial.print(" | Right PWM: ");
+  Serial.println(rightSpeed);
+
+  delay(100);
+}
