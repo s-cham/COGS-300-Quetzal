@@ -1,0 +1,411 @@
+// =========================
+// MOTOR PINS
+// =========================
+
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+
+const int ENA = 9;
+const int ENB = 11;
+
+
+// =========================
+// ULTRASONIC SENSOR PINS
+// =========================
+
+// Front HC-SR04
+const int frontTrig = 3;
+const int frontEcho = 4;
+
+// Side HC-SR04
+const int sideTrig = 6;
+const int sideEcho = 2;
+
+
+// =========================
+// WALL FOLLOWING SETTINGS
+// =========================
+
+const float targetDistance = 25.0;
+
+// How many PWM units to slow the inside wheel per cm of error.
+// (Only one wheel slows now, so this is higher than the old 2.5.)
+const float Kp = 5.0;
+
+// Wall on RIGHT
+const bool wallOnRight = true;
+
+// ENA controls LEFT motor
+const bool enaIsLeft = true;
+
+
+// =========================
+// SPEED SETTINGS
+// =========================
+// Each wheel cruises at its own max when the robot is on target.
+// Set the STRONGER motor's max lower so both wheels end up driving straight.
+// Example: left motor is stronger -> leftMaxSpeed = 235, rightMaxSpeed = 255
+
+int leftMaxSpeed  = 235;
+int rightMaxSpeed = 255;
+
+// Lowest PWM a wheel may drop to while steering (below this the motor stalls)
+int minSpeed = 115;
+
+// Pivot speed when a wall is ahead (both wheels).
+// Raise toward 255 if the robot can't pivot away from the wall.
+int turnSpeed = 200;
+
+// =========================
+// FRONT OBSTACLE SETTINGS
+// =========================
+
+// React earlier so the robot doesn't get jammed against the wall.
+// (was 15 cm) Raise it more if it still gets too close at full speed.
+const float frontStopDistance = 25.0;
+
+// ---- AVOID MANEUVER: back up, then pivot, in one committed move ----
+
+// 1) BACK UP at full power (each wheel's max, so it stays straight)
+//    until the front sensor sees at least this much room.
+const float backUpDistance = 35.0;   // cm from the wall to back up to
+const int backUpMinMs = 150;         // always reverse at least this long
+const int backUpMaxMs = 1200;        // safety timeout if the sensor never gets there
+
+// 2) PIVOT away from the followed wall until the front is clear
+const float turnClearDistance = 50.0; // cm of open space ahead that means "go"
+const int turnMinMs = 150;            // always pivot at least this long
+const int turnMaxMs = 1200;           // safety timeout
+
+// If the front sensor is pressed against a wall it often returns NO echo
+// (HC-SR04 can't read under ~2 cm). Treat repeated no-echo as "blocked".
+// Turn this off if your robot works in big open spaces (> 4 m) where no echo is normal.
+const bool treatNoFrontEchoAsBlocked = true;
+const int frontInvalidLimit = 2;   // consecutive no-echo readings before we call it blocked
+int frontInvalidCount = 0;
+
+
+// =========================
+// SENSOR FILTERING
+// =========================
+
+float filteredSide = 25.0;
+bool firstReading = true;
+
+float lastValidSide = -1;
+
+int invalidSideCount = 0;
+const int maxInvalidSideReadings = 5;
+
+
+// =========================
+// READ ULTRASONIC DISTANCE
+// =========================
+
+float readDistance(int trig, int echo) {
+
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trig, LOW);
+
+  long duration = pulseIn(echo, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < 2 || distance > 350) {
+    return -1;
+  }
+
+  return distance;
+}
+
+
+// =========================
+// MOTOR CONTROL
+// =========================
+
+void motors(int leftSpeed, int rightSpeed) {
+
+  leftSpeed = constrain(leftSpeed, -255, 255);
+  rightSpeed = constrain(rightSpeed, -255, 255);
+
+  int speedA;
+  int speedB;
+
+  if (enaIsLeft) {
+    speedA = leftSpeed;
+    speedB = rightSpeed;
+  }
+  else {
+    speedA = rightSpeed;
+    speedB = leftSpeed;
+  }
+
+  // Channel A
+  if (speedA > 0) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  }
+  else if (speedA < 0) {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+  }
+  else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+  }
+
+  // Channel B
+  if (speedB > 0) {
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  }
+  else if (speedB < 0) {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+  }
+  else {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+  }
+
+  analogWrite(ENA, abs(speedA));
+  analogWrite(ENB, abs(speedB));
+}
+
+
+// =========================
+// AVOID OBSTACLE (back up, then turn, no dithering)
+// =========================
+// Runs as one committed maneuver instead of repeating tiny back-and-forth
+// steps each loop pass.
+
+void avoidObstacle() {
+
+  unsigned long start;
+
+  // ---- 1. BACK UP until there is enough room ----
+
+  start = millis();
+  motors(-leftMaxSpeed, -rightMaxSpeed);
+
+  while (millis() - start < backUpMaxMs) {
+
+    float d = readDistance(frontTrig, frontEcho);
+
+    if (millis() - start >= backUpMinMs && d >= backUpDistance) {
+      break;
+    }
+  }
+
+  motors(0, 0);
+  delay(40);   // let the motors settle before reversing direction
+
+
+  // ---- 2. PIVOT away from the followed wall until the front is clear ----
+
+  start = millis();
+
+  if (wallOnRight) {
+    motors(-turnSpeed, turnSpeed);    // pivot LEFT
+  }
+  else {
+    motors(turnSpeed, -turnSpeed);    // pivot RIGHT
+  }
+
+  while (millis() - start < turnMaxMs) {
+
+    float d = readDistance(frontTrig, frontEcho);
+
+    if (millis() - start >= turnMinMs && d >= turnClearDistance) {
+      break;
+    }
+  }
+
+  motors(0, 0);
+  delay(40);
+
+
+  // ---- Fresh start for the side-wall controller ----
+
+  firstReading = true;
+  lastValidSide = -1;
+  invalidSideCount = 0;
+}
+
+
+// =========================
+// SETUP
+// =========================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  motors(0, 0);
+
+  delay(1000);
+
+  Serial.println("Wall Following Ready!");
+}
+
+
+// =========================
+// MAIN LOOP
+// =========================
+
+void loop() {
+
+  // ---- READ SENSORS ----
+
+  float front = readDistance(frontTrig, frontEcho);
+
+  delay(30);
+
+  float side = readDistance(sideTrig, sideEcho);
+
+  Serial.print("Front: ");
+  Serial.print(front);
+  Serial.print(" cm | Side: ");
+  Serial.print(side);
+  Serial.println(" cm");
+
+
+  // ---- FRONT OBSTACLE ----
+
+  // Count consecutive "no echo" readings from the front sensor
+  if (front < 0) {
+    frontInvalidCount++;
+  }
+  else {
+    frontInvalidCount = 0;
+  }
+
+  bool blockedAhead = (front >= 2 && front < frontStopDistance);
+
+  if (treatNoFrontEchoAsBlocked && frontInvalidCount >= frontInvalidLimit) {
+    blockedAhead = true;
+  }
+
+  if (blockedAhead) {
+
+    Serial.println("Obstacle ahead - avoiding");
+
+    avoidObstacle();
+
+    frontInvalidCount = 0;
+
+    return;
+  }
+
+
+  // ---- SIDE SENSOR ----
+
+  if (side >= 2 && side <= 150) {
+
+    invalidSideCount = 0;
+    lastValidSide = side;
+
+    if (firstReading) {
+      filteredSide = side;
+      firstReading = false;
+    }
+    else {
+      filteredSide = 0.6 * filteredSide + 0.4 * side;
+    }
+  }
+  else {
+
+    invalidSideCount++;
+
+    Serial.println("Invalid side reading");
+
+    // No wall known yet, or the wall has been gone for several readings:
+    // keep moving straight instead of stopping (stopping caused the pauses).
+    if (lastValidSide < 0 || invalidSideCount >= maxInvalidSideReadings) {
+      Serial.println("No wall - driving straight");
+      motors(leftMaxSpeed, rightMaxSpeed);
+      delay(30);
+      return;
+    }
+
+    // Brief dropout: keep using the last good reading
+    filteredSide = lastValidSide;
+  }
+
+
+  // ---- P-CONTROLLER ----
+  // error > 0 : too far from the wall
+  // error < 0 : too close to the wall
+
+  float error = filteredSide - targetDistance;
+
+  float slowdown = Kp * abs(error);
+
+
+  // ---- CALCULATE MOTOR SPEEDS ----
+  // Start both wheels at their max, then slow ONLY the inside wheel.
+
+  int leftSpeed  = leftMaxSpeed;
+  int rightSpeed = rightMaxSpeed;
+
+  // Which wheel needs to slow down to steer back to the target?
+  //   Wall on right, too far  -> turn right -> slow RIGHT wheel
+  //   Wall on right, too close-> turn left  -> slow LEFT wheel
+  //   (mirrored when the wall is on the left)
+  bool slowRightWheel = wallOnRight ? (error > 0) : (error < 0);
+
+  if (slowRightWheel) {
+    rightSpeed = rightMaxSpeed - slowdown;
+  }
+  else {
+    leftSpeed = leftMaxSpeed - slowdown;
+  }
+
+  // Never drop below the stall speed
+  leftSpeed  = max(leftSpeed,  minSpeed);
+  rightSpeed = max(rightSpeed, minSpeed);
+
+
+  // ---- DRIVE ----
+
+  motors(leftSpeed, rightSpeed);
+
+
+  // ---- DEBUG ----
+
+  Serial.print("Filtered Side: ");
+  Serial.print(filteredSide);
+  Serial.print(" | Error: ");
+  Serial.print(error);
+  Serial.print(" | Left PWM: ");
+  Serial.print(leftSpeed);
+  Serial.print(" | Right PWM: ");
+  Serial.println(rightSpeed);
+
+  delay(30);
+}
