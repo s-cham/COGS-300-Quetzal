@@ -1,0 +1,321 @@
+// ============================================
+// WALL FOLLOWING ROBOT
+// 2 HC-SR04 sensors + L298N motor driver
+// ============================================
+
+// L298N motor direction pins
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+
+// Motor speed pins
+const int ENB = 11;  // LEFT MOTOR
+const int ENA = 9;   // RIGHT MOTOR (SLOWER)
+
+// Ultrasonic sensor pins
+const int frontTrig = 3;
+const int frontEcho = 4;
+
+const int sideTrig = 6;
+const int sideEcho = 2;
+
+// ============================================
+// CUSTOMIZABLE SETTINGS
+// ============================================
+
+// Individual motor speeds (0-255)
+int leftSpeed = 150;
+int rightSpeed = 125;
+
+// Desired distance from right wall
+const float targetDistance = 25.0;
+
+// Front obstacle detection distance
+const float frontStopDistance = 15.0;
+
+// Steering sensitivity
+const float Kp = 2.0;
+
+// Maximum steering adjustment
+const int maxCorrection = 45;
+
+// Wall location
+const bool wallOnRight = true;
+
+// Change to true only if a motor runs backward
+// when commanded forward.
+const bool reverseLeftMotor = false;
+const bool reverseRightMotor = false;
+
+// ============================================
+// DISTANCE SENSOR FUNCTION
+// ============================================
+
+float readDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(3);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < 2 || distance > 350) {
+    return -1;
+  }
+
+  return distance;
+}
+
+// ============================================
+// STABLE DISTANCE READING
+// Takes 3 readings and returns the median
+// ============================================
+
+float getStableDistance(int trigPin, int echoPin) {
+
+  float readings[3];
+  int count = 0;
+
+  for (int i = 0; i < 3; i++) {
+
+    float distance = readDistance(trigPin, echoPin);
+
+    if (distance > 0) {
+      readings[count] = distance;
+      count++;
+    }
+
+    delay(30);
+  }
+
+  if (count == 0) {
+    return -1;
+  }
+
+  // Sort readings
+  for (int i = 0; i < count - 1; i++) {
+    for (int j = i + 1; j < count; j++) {
+
+      if (readings[i] > readings[j]) {
+
+        float temp = readings[i];
+        readings[i] = readings[j];
+        readings[j] = temp;
+
+      }
+    }
+  }
+
+  return readings[count / 2];
+}
+
+// ============================================
+// MOTOR CONTROL
+// ENB = LEFT MOTOR
+// ENA = RIGHT MOTOR
+// ============================================
+
+void motors(int left, int right) {
+
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+
+  // Reverse direction if necessary
+  if (reverseLeftMotor) {
+    left = -left;
+  }
+
+  if (reverseRightMotor) {
+    right = -right;
+  }
+
+  // LEFT MOTOR: IN3 and IN4
+  if (left > 0) {
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  }
+  else if (left < 0) {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+  }
+  else {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+  }
+
+  // RIGHT MOTOR: IN1 and IN2
+  if (right > 0) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  }
+  else if (right < 0) {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+  }
+  else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+  }
+
+  // ENB controls LEFT motor speed
+  analogWrite(ENB, abs(left));
+
+  // ENA controls RIGHT motor speed
+  analogWrite(ENA, abs(right));
+}
+
+// ============================================
+// STOP MOTORS
+// ============================================
+
+void stopMotors() {
+  motors(0, 0);
+}
+
+// ============================================
+// SETUP
+// ============================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  stopMotors();
+
+  Serial.println("Wall Following Robot Started");
+}
+
+// ============================================
+// MAIN LOOP
+// ============================================
+
+void loop() {
+
+  // Read front sensor
+  float frontDistance =
+    getStableDistance(frontTrig, frontEcho);
+
+  // Allow time between ultrasonic sensors
+  delay(60);
+
+  // Read side sensor
+  float sideDistance =
+    getStableDistance(sideTrig, sideEcho);
+
+  // Print readings
+  Serial.print("Front: ");
+  Serial.print(frontDistance);
+
+  Serial.print(" cm | Side: ");
+  Serial.print(sideDistance);
+  Serial.println(" cm");
+
+  // ============================================
+  // FRONT OBSTACLE DETECTION
+  // ============================================
+
+  if (frontDistance > 0 &&
+      frontDistance <= frontStopDistance) {
+
+    Serial.println("Obstacle detected! Turning left.");
+
+    stopMotors();
+    delay(150);
+
+    // Turn left
+    motors(-140, 140);
+
+    delay(350);
+
+    stopMotors();
+    delay(150);
+
+    return;
+  }
+
+  // ============================================
+  // SIDE WALL FOLLOWING
+  // ============================================
+
+  if (sideDistance < 0) {
+
+    Serial.println("Side wall not detected.");
+
+    motors(leftSpeed, rightSpeed);
+
+    delay(100);
+
+    return;
+  }
+
+  // Calculate distance error
+  float error = sideDistance - targetDistance;
+
+  // Calculate correction
+  float correction = Kp * error;
+
+  correction = constrain(
+    correction,
+    -maxCorrection,
+    maxCorrection
+  );
+
+  int adjustedLeft;
+  int adjustedRight;
+
+  if (wallOnRight) {
+
+    // Too far from wall: steer right
+    adjustedLeft = leftSpeed - correction;
+    adjustedRight = rightSpeed + correction;
+
+  }
+  else {
+
+    // Wall on left
+    adjustedLeft = leftSpeed + correction;
+    adjustedRight = rightSpeed - correction;
+
+  }
+
+  // Keep motor speeds within range
+  adjustedLeft = constrain(adjustedLeft, 0, 255);
+  adjustedRight = constrain(adjustedRight, 0, 255);
+
+  // Run motors
+  motors(adjustedLeft, adjustedRight);
+
+  // Print motor speeds
+  Serial.print("Left motor (ENB): ");
+  Serial.print(adjustedLeft);
+
+  Serial.print(" | Right motor (ENA): ");
+  Serial.println(adjustedRight);
+
+  delay(100);
+}
