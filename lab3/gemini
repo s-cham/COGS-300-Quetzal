@@ -1,0 +1,153 @@
+// =========================
+// MOTOR PINS
+// =========================
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+const int ENA = 9;    // RIGHT motor
+const int ENB = 11;   // LEFT motor
+
+// =========================
+// ULTRASONIC PINS
+// =========================
+const int frontTrig = 3;
+const int frontEcho = 4;
+const int sideTrig  = 6;    // faces RIGHT
+const int sideEcho  = 2;
+
+// =========================
+// SETTINGS
+// =========================
+const int leftSpeed  = 100;
+const int rightSpeed = 90;
+const int pivotSpeed = 120;   
+const int minSteerSpeed = 40; 
+
+// =========================
+// CONTROL CONSTANTS
+// =========================
+const float Kp = 3.5;               
+const float targetWallDist = 15.0;  
+const float frontObstacleThresh = 22.0; 
+
+void setup() {
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  Serial.begin(9600);
+}
+
+void loop() {
+  float frontDist = getDistance(frontTrig, frontEcho);
+  float sideDist = getDistance(sideTrig, sideEcho);
+
+  Serial.print("Front: "); Serial.print(frontDist);
+  Serial.print(" cm | Side: "); Serial.println(sideDist);
+
+  // 1. INSIDE CORNER (Wall directly ahead)
+  if (frontDist > 0 && frontDist < frontObstacleThresh) {
+    // Stop briefly to stabilize
+    stopRobot();
+    delay(100);
+
+    // Pivot left until the front is clear of the obstacle
+    while (frontDist < frontObstacleThresh + 10.0) {
+      turnLeft(pivotSpeed);
+      delay(50);
+      frontDist = getDistance(frontTrig, frontEcho);
+    }
+    
+    // Brief pause to let sensors settle into the new corridor
+    stopRobot();
+    delay(200);
+  }
+  // 2. OUTSIDE CORNER (Wall lost on the right)
+  else if (sideDist > 40.0 || sideDist == 0) {
+    // Drive forward slightly past the corner edge
+    moveRobot(rightSpeed, leftSpeed);
+    delay(300); 
+
+    // Smooth arc right to sweep and find the new wall
+    unsigned long searchStartTime = millis();
+    while (millis() - searchStartTime < 800) {
+      float currentSide = getDistance(sideTrig, sideEcho);
+      // If we find the wall again, break out of search mode
+      if (currentSide > 0 && currentSide < 35.0) {
+        break;
+      }
+      moveRobot(rightSpeed * 0.6, leftSpeed * 1.2); // Gentle right arc
+      delay(40);
+    }
+  }
+  // 3. NORMAL WALL FOLLOWING (P-Controller)
+  else {
+    float error = sideDist - targetWallDist; 
+    float correction = Kp * error;
+
+    int rSpd = rightSpeed - correction;
+    int lSpd = leftSpeed + correction;
+
+    rSpd = constrain(rSpd, minSteerSpeed, 255);
+    lSpd = constrain(lSpd, minSteerSpeed, 255);
+
+    moveRobot(rSpd, lSpd);
+  }
+
+  delay(30);
+}
+
+// Helper function to measure distance using ultrasonic sensors
+float getDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 25000); 
+  if (duration == 0) return 50.0; // Max cap timeout
+  return duration * 0.034 / 2.0;
+}
+
+// Drive both motors forward
+void moveRobot(int rSpd, int lSpd) {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, rSpd);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, lSpd);
+}
+
+// Pivot in place (Left motor back, Right motor forward)
+void turnLeft(int spd) {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, spd);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  analogWrite(ENB, spd);
+}
+
+// Stop all motion
+void stopRobot() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 0);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENB, 0);
+}
