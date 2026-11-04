@@ -1,0 +1,176 @@
+// =========================
+// MOTOR PINS
+// =========================
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+const int ENA = 9;    // RIGHT motor
+const int ENB = 11;   // LEFT motor
+
+// =========================
+// ULTRASONIC PINS
+// =========================
+const int frontTrig = 3;
+const int frontEcho = 4;
+const int sideTrig  = 6;   // faces RIGHT
+const int sideEcho  = 2;
+
+// =========================
+// SETTINGS
+// =========================
+const int leftSpeed  = 100;
+const int rightSpeed = 90;
+const int pivotSpeed = 130;   // pivots need a bit more power than cruising
+const int minSteerSpeed = 40; // lowest speed of the wheel that slows to steer
+
+// Front
+const float stopDistance   = 20.0;
+const float resumeDistance = 25.0;
+const int stopConfirm   = 2;
+const int resumeConfirm = 2;
+const unsigned long stuckMs = 1500;  // stopped this long -> maneuver instead of waiting
+
+// Side
+const float sideKeepDistance = 20.0; // start steering away below this
+const float sideDangerDistance = 12.0; // back up + turn below this
+const float sideKp = 5.0;            // PWM slowdown per cm inside 20 cm
+const int sideDangerConfirm = 2;
+
+// Maneuver timing (short, so the robot keeps moving)
+const int backMs = 400;
+const int turnMs = 350;
+
+bool stopped = false;
+int closeCount = 0;
+int clearCount = 0;
+int sideDangerCount = 0;
+unsigned long stoppedSince = 0;
+
+// Returns distance in cm, or -1 if no valid echo
+float readDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+  long duration = pulseIn(echo, HIGH, 25000);
+  if (duration == 0) return -1;
+
+  float distance = duration * 0.0343 / 2.0;
+  if (distance < 2 || distance > 350) return -1;
+  return distance;
+}
+
+void setMotor(int in1, int in2, int en, int speed) {
+  speed = constrain(speed, -255, 255);
+  digitalWrite(in1, speed > 0 ? HIGH : LOW);
+  digitalWrite(in2, speed < 0 ? HIGH : LOW);
+  analogWrite(en, abs(speed));
+}
+
+// ENA = right motor, ENB = left motor. Negative = reverse.
+void drive(int left, int right) {
+  setMotor(IN1, IN2, ENA, right);
+  setMotor(IN3, IN4, ENB, left);
+}
+
+// Back up, pivot away from the right-hand obstacle, and if the front
+// is still blocked, pivot the other way. Takes about 1 second at most.
+void avoid() {
+  Serial.println("Avoiding: back up + turn");
+
+  drive(-leftSpeed, -rightSpeed);
+  delay(backMs);
+
+  drive(-pivotSpeed, pivotSpeed);      // pivot LEFT (away from right side)
+  delay(turnMs);
+  drive(0, 0);
+  delay(40);
+
+  float f = readDistance(frontTrig, frontEcho);
+  if (f >= 2 && f < resumeDistance) {  // still blocked: try the opposite direction
+    drive(pivotSpeed, -pivotSpeed);    // pivot RIGHT
+    delay(turnMs * 2);                 // undo the first turn, then some
+    drive(0, 0);
+    delay(40);
+  }
+
+  stopped = false;
+  closeCount = clearCount = sideDangerCount = 0;
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT); pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);  pinMode(sideEcho, INPUT);
+
+  drive(0, 0);
+  delay(1000);
+  Serial.println("Ready");
+}
+
+void loop() {
+  float front = readDistance(frontTrig, frontEcho);
+  delay(30);                                   // let the echo die before the next ping
+  float side = readDistance(sideTrig, sideEcho);
+
+  Serial.print("Front: "); Serial.print(front);
+  Serial.print(" | Side: "); Serial.print(side);
+  Serial.println(stopped ? "  [STOPPED]" : "  [DRIVING]");
+
+  // ---- FRONT STOP / RESUME (unchanged) ----
+  bool obstacle = (front >= 2 && front < stopDistance);
+  bool clear = (front < 0 || front >= resumeDistance);
+
+  if (!stopped) {
+    closeCount = obstacle ? closeCount + 1 : 0;
+    if (closeCount >= stopConfirm) {
+      stopped = true;
+      stoppedSince = millis();
+      closeCount = 0;
+      clearCount = 0;
+      drive(0, 0);
+    }
+  } else {
+    clearCount = clear ? clearCount + 1 : 0;
+    if (clearCount >= resumeConfirm) {
+      stopped = false;
+      clearCount = 0;
+      closeCount = 0;
+    }
+  }
+
+  if (stopped) {
+    drive(0, 0);
+    if (millis() - stoppedSince > stuckMs) avoid();   // don't wait forever
+    delay(40);
+    return;
+  }
+
+  // ---- SIDE: too close -> back up and turn away ----
+  bool sideDanger = (side >= 2 && side < sideDangerDistance);
+  sideDangerCount = sideDanger ? sideDangerCount + 1 : 0;
+  if (sideDangerCount >= sideDangerConfirm) {
+    avoid();
+    return;
+  }
+
+  // ---- SIDE: inside 20 cm -> steer gently away (turn left = slow LEFT wheel) ----
+  int left  = leftSpeed;
+  int right = rightSpeed;
+
+  if (side >= 2 && side < sideKeepDistance) {
+    float slowdown = sideKp * (sideKeepDistance - side);
+    left = max((int)(leftSpeed - slowdown), minSteerSpeed);
+  }
+
+  drive(left, right);
+  delay(40);
+}
