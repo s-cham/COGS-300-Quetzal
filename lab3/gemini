@@ -21,17 +21,18 @@ const int sideEcho  = 2;
 // =========================
 const int leftSpeed  = 100;
 const int rightSpeed = 90;
-const int pivotSpeed = 120;   
-const int minSteerSpeed = 40; 
+const int pivotSpeed = 90;    // Balanced speed to avoid violent over-spinning
+const int minSteerSpeed = 40; // Floor to prevent motor stall in dead zone
 
 // =========================
 // CONTROL CONSTANTS
 // =========================
-const float Kp = 3.5;               
-const float targetWallDist = 15.0;  
-const float frontObstacleThresh = 22.0; 
+const float Kp = 3.5;                 // Proportional gain for wall following
+const float targetWallDist = 15.0;    // Target distance from the right wall in cm
+const float frontObstacleThresh = 30.0; // Early reaction threshold for inside corners
 
 void setup() {
+  // Motor pin modes
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
@@ -39,6 +40,7 @@ void setup() {
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
 
+  // Ultrasonic pin modes
   pinMode(frontTrig, OUTPUT);
   pinMode(frontEcho, INPUT);
   pinMode(sideTrig, OUTPUT);
@@ -51,62 +53,70 @@ void loop() {
   float frontDist = getDistance(frontTrig, frontEcho);
   float sideDist = getDistance(sideTrig, sideEcho);
 
+  // Debugging output
   Serial.print("Front: "); Serial.print(frontDist);
   Serial.print(" cm | Side: "); Serial.println(sideDist);
 
-  // 1. INSIDE CORNER (Wall directly ahead)
+  // 1. INSIDE CORNER CASE: Obstacle directly ahead
   if (frontDist > 0 && frontDist < frontObstacleThresh) {
-    // Stop briefly to stabilize
-    stopRobot();
-    delay(100);
+    // Quick reverse brake pulse to kill forward momentum
+    brakeRobot();
+    delay(80);
 
-    // Pivot left until the front is clear of the obstacle
+    // Controlled left turn until the front is clear
+    unsigned long turnStartTime = millis();
     while (frontDist < frontObstacleThresh + 10.0) {
       turnLeft(pivotSpeed);
-      delay(50);
+      delay(30);
       frontDist = getDistance(frontTrig, frontEcho);
+      
+      // Safety timeout to prevent infinite loops if sensor drops a reading
+      if (millis() - turnStartTime > 600) {
+        break; 
+      }
     }
     
-    // Brief pause to let sensors settle into the new corridor
     stopRobot();
-    delay(200);
+    delay(150);
   }
-  // 2. OUTSIDE CORNER (Wall lost on the right)
+  // 2. OUTSIDE CORNER CASE: Wall suddenly drops away / lost on the right
   else if (sideDist > 40.0 || sideDist == 0) {
     // Drive forward slightly past the corner edge
     moveRobot(rightSpeed, leftSpeed);
-    delay(300); 
+    delay(250); 
 
     // Smooth arc right to sweep and find the new wall
     unsigned long searchStartTime = millis();
-    while (millis() - searchStartTime < 800) {
+    while (millis() - searchStartTime < 600) {
       float currentSide = getDistance(sideTrig, sideEcho);
-      // If we find the wall again, break out of search mode
       if (currentSide > 0 && currentSide < 35.0) {
-        break;
+        break; // Found the wall, exit search mode
       }
-      moveRobot(rightSpeed * 0.6, leftSpeed * 1.2); // Gentle right arc
-      delay(40);
+      moveRobot(rightSpeed * 0.7, leftSpeed * 1.2); 
+      delay(30);
     }
   }
-  // 3. NORMAL WALL FOLLOWING (P-Controller)
+  // 3. NORMAL WALL FOLLOWING: P-Controller
   else {
+    // error = measurement - set_point
     float error = sideDist - targetWallDist; 
     float correction = Kp * error;
 
+    // Adjust motor speeds dynamically based on error
     int rSpd = rightSpeed - correction;
     int lSpd = leftSpeed + correction;
 
+    // Constrain to acceptable motor speeds and minSteerSpeed floor
     rSpd = constrain(rSpd, minSteerSpeed, 255);
     lSpd = constrain(lSpd, minSteerSpeed, 255);
 
     moveRobot(rSpd, lSpd);
   }
 
-  delay(30);
+  delay(25);
 }
 
-// Helper function to measure distance using ultrasonic sensors
+// Helper function to measure distance with a hardware dead-zone safety clamp
 float getDistance(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -114,12 +124,19 @@ float getDistance(int trigPin, int echoPin) {
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  long duration = pulseIn(echoPin, HIGH, 25000); 
-  if (duration == 0) return 50.0; // Max cap timeout
-  return duration * 0.034 / 2.0;
+  long duration = pulseIn(echoPin, HIGH, 20000); // 20ms timeout (~30cm limit)
+  if (duration == 0) return 40.0; // Return max cap if timeout
+  
+  float dist = duration * 0.034 / 2.0;
+
+  // HC-SR04 acoustic ringing dead-zone filter (< 5cm false inflation fix)
+  if (dist < 5.0) {
+    return 5.0; 
+  }
+  return dist;
 }
 
-// Drive both motors forward
+// Drive both motors forward at specified speeds
 void moveRobot(int rSpd, int lSpd) {
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
@@ -139,6 +156,17 @@ void turnLeft(int spd) {
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
   analogWrite(ENB, spd);
+}
+
+// Active brief reverse pulse to kill forward momentum
+void brakeRobot() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  analogWrite(ENA, 80);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  analogWrite(ENB, 80);
 }
 
 // Stop all motion
