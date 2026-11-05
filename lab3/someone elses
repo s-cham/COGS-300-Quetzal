@@ -1,0 +1,147 @@
+// FROM HERE:
+// https://github.com/nilutpolkashyap/arduino_uno_robots/blob/main/obstacle_avoiding_robot/obstacle_avoider.ino
+
+// =========================
+// PINS
+// =========================
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+const int ENA = 9;     // RIGHT motor
+const int ENB = 11;    // LEFT motor
+
+const int frontTrig = 3;
+const int frontEcho = 4;
+const int sideTrig  = 6;   // faces RIGHT
+const int sideEcho  = 2;
+
+// =========================
+// SETTINGS
+// =========================
+const int leftSpeed  = 100;   // cruise (left is stronger, so slightly higher PWM is your tuned value)
+const int rightSpeed = 90;
+const int slowFactorPct = 80; // % of cruise speed when a wall is getting close ahead
+const int turnSpeed  = 100;   // pivot speed
+const int steerSpeed = 60;    // speed of the wheel that slows to steer
+
+const float FRONT_DIS = 20.0; // wall ahead below this
+const float FRONT_SLOW = 40.0;// start slowing below this
+const float SIDE_NEAR = 15.0; // right wall too close -> steer left
+const float SIDE_FAR  = 30.0; // right wall too far / gone -> steer right
+const float MAX_DIST  = 100.0;
+
+const int turn45Ms = 300;     // time to pivot ~45 degrees (tune this)
+const int steerMs  = 120;     // length of a steering nudge
+
+// =========================
+// MOTORS (negative = reverse)
+// =========================
+void setMotor(int in1, int in2, int en, int speed) {
+  speed = constrain(speed, -255, 255);
+  digitalWrite(in1, speed > 0 ? HIGH : LOW);
+  digitalWrite(in2, speed < 0 ? HIGH : LOW);
+  analogWrite(en, abs(speed));
+}
+
+void drive(int left, int right) {
+  setMotor(IN1, IN2, ENA, right);
+  setMotor(IN3, IN4, ENB, left);
+}
+
+void forward()      { drive(leftSpeed, rightSpeed); }
+void forwardSlow()  { drive(leftSpeed * slowFactorPct / 100, rightSpeed * slowFactorPct / 100); }
+void steerLeft()    { drive(steerSpeed, rightSpeed); }   // slow left wheel
+void steerRight()   { drive(leftSpeed, steerSpeed); }    // slow right wheel
+void turnLeft()     { drive(-turnSpeed, turnSpeed); }
+void turnRight()    { drive(turnSpeed, -turnSpeed); }
+void reverse()      { drive(-leftSpeed, -rightSpeed); }
+void stopCar()      { drive(0, 0); }
+
+// =========================
+// SENSORS
+// =========================
+float readDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+  long dur = pulseIn(echo, HIGH, 20000);   // timeout so it never hangs
+  if (dur == 0) return MAX_DIST;           // no echo = nothing in range
+  float d = dur * 0.034 / 2.0;
+  if (d < 5.0) return 5.0;                 // inside the sensor's dead zone
+  if (d > MAX_DIST) return MAX_DIST;
+  return d;
+}
+
+float FrontSensor() { return readDistance(frontTrig, frontEcho); }
+float RightSensor() { return readDistance(sideTrig, sideEcho); }
+
+// =========================
+// SETUP
+// =========================
+void setup() {
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+  pinMode(frontTrig, OUTPUT); pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);  pinMode(sideEcho, INPUT);
+  Serial.begin(9600);
+  stopCar();
+  delay(1000);
+}
+
+// =========================
+// LOOP
+// =========================
+void loop() {
+  // Read each sensor ONCE per loop (the examples called them several times)
+  float front = FrontSensor();
+  delay(15);                       // let the echo die before pinging the other sensor
+  float right = RightSensor();
+
+  bool frontBlocked = (front < FRONT_DIS);
+  bool rightNear    = (right < SIDE_NEAR);
+  bool rightFar     = (right > SIDE_FAR);
+
+  Serial.print("Front: "); Serial.print(front);
+  Serial.print(" | Right: "); Serial.print(right);
+  Serial.print(" | ");
+
+  if (frontBlocked && !rightFar) {
+    // Wall ahead and right wall close: only way out is left
+    Serial.println("Front+Right blocked: back up, turn left");
+    reverse();   delay(150);
+    turnLeft();  delay(turn45Ms);
+    stopCar();   delay(60);
+  }
+  else if (frontBlocked && rightFar) {
+    // Wall ahead but right side open: turn right (right-hand rule)
+    Serial.println("Front blocked, right open: turn right");
+    reverse();    delay(100);
+    turnRight();  delay(turn45Ms);
+    stopCar();    delay(60);
+  }
+  else if (rightNear) {
+    // Too close to the right wall (or its corner): nudge left
+    Serial.println("Right near: steer left");
+    steerLeft();  delay(steerMs);
+  }
+  else if (rightFar) {
+    // Right wall far or gone: nudge right to find it
+    Serial.println("Right far: steer right");
+    steerRight(); delay(steerMs);
+  }
+  else if (front < FRONT_SLOW) {
+    Serial.println("Wall approaching: slow");
+    forwardSlow();
+  }
+  else {
+    Serial.println("Clear: forward");
+    forward();
+  }
+
+  delay(20);
+}
