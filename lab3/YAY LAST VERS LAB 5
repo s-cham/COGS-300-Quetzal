@@ -1,0 +1,290 @@
+
+ // ======================================
+ // MOTOR PINS
+ // ======================================
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+
+const int ENA = 9;    // RIGHT MOTOR
+const int ENB = 11;   // LEFT MOTOR
+
+// ======================================
+// ULTRASONIC SENSORS
+// ======================================
+const int frontTrig = 3;
+const int frontEcho = 4;
+
+const int sideTrig = 6;
+const int sideEcho = 2;
+
+// ======================================
+// MOTOR SPEEDS
+// ======================================
+int leftSpeed = 100;
+int rightSpeed = 75;
+
+const int turnSpeed = 150;
+const int turnDuration = 600;
+
+// ======================================
+// DISTANCE SETTINGS
+// ======================================
+const float set_point = 20.0;
+const float set_point_front = 15.0;
+const float rightDetectDistance = 25.0;
+
+// ======================================
+// PID SETTINGS
+// ======================================
+const float Kp = 5.0;
+const float Ki = 1.0;
+const float Kd = 3.0;
+
+float integral = 0;
+float previousError = 0;
+unsigned long previousTime = 0;
+
+// ======================================
+// MOTOR CONTROL
+// ======================================
+void driveMotor(int enablePin, int pin1, int pin2, int speed) {
+
+  speed = constrain(speed, -255, 255);
+
+  if (speed > 0) {
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+  }
+  else if (speed < 0) {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+  }
+  else {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, LOW);
+  }
+
+  analogWrite(enablePin, abs(speed));
+}
+
+// ======================================
+// READ ULTRASONIC SENSOR
+// ======================================
+float readDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < 2 || distance > 300) {
+    return -1;
+  }
+
+  return distance;
+}
+
+// ======================================
+// TURN LEFT
+// ======================================
+void turnLeft() {
+
+  Serial.println("TURNING LEFT");
+
+  driveMotor(ENA, IN1, IN2, turnSpeed);
+  driveMotor(ENB, IN3, IN4, -turnSpeed);
+
+  delay(turnDuration);
+
+  stopMotors();
+  resetPID();
+}
+
+// ======================================
+// TURN RIGHT
+// ======================================
+void turnRight() {
+
+  Serial.println("TURNING RIGHT");
+
+  driveMotor(ENA, IN1, IN2, -turnSpeed);
+  driveMotor(ENB, IN3, IN4, turnSpeed);
+
+  delay(turnDuration);
+
+  stopMotors();
+  resetPID();
+}
+
+// ======================================
+// STOP MOTORS
+// ======================================
+void stopMotors() {
+
+  driveMotor(ENA, IN1, IN2, 0);
+  driveMotor(ENB, IN3, IN4, 0);
+}
+
+// ======================================
+// RESET PID
+// ======================================
+void resetPID() {
+
+  integral = 0;
+  previousError = 0;
+  previousTime = millis();
+}
+
+// ======================================
+// WALL FOLLOWING
+// ======================================
+void wall_following() {
+
+  // Read front sensor first
+  float frontDistance = readDistance(frontTrig, frontEcho);
+
+  // Check for front obstacle
+  if (frontDistance > 0 &&
+      frontDistance <= set_point_front) {
+
+    Serial.println("FRONT OBSTACLE!");
+
+    // Check right sensor
+    float rightDistance = readDistance(sideTrig, sideEcho);
+
+    if (rightDistance > 0 &&
+        rightDistance <= rightDetectDistance) {
+
+      // Right side blocked -> turn left
+      Serial.println("RIGHT SIDE BLOCKED");
+      turnLeft();
+
+    } else {
+
+      // Right side clear -> turn right
+      Serial.println("RIGHT SIDE CLEAR");
+      turnRight();
+    }
+
+    return;
+  }
+
+  // ====================================
+  // NORMAL RIGHT WALL FOLLOWING
+  // ====================================
+
+  float currentDistance = readDistance(sideTrig, sideEcho);
+
+  // No right wall detected: drive straight
+  if (currentDistance < 0) {
+
+    driveMotor(ENA, IN1, IN2, rightSpeed);
+    driveMotor(ENB, IN3, IN4, leftSpeed);
+
+    resetPID();
+
+    Serial.println("No right wall - driving straight");
+    return;
+  }
+
+  // Calculate time
+  unsigned long currentTime = millis();
+
+  float deltaTime =
+    (currentTime - previousTime) / 1000.0;
+
+  if (deltaTime <= 0) {
+    deltaTime = 0.02;
+  }
+
+  previousTime = currentTime;
+
+  // Calculate error
+  float error = currentDistance - set_point;
+
+  // PID calculations
+  integral += error * deltaTime;
+  integral = constrain(integral, -50.0, 50.0);
+
+  float derivative =
+    (error - previousError) / deltaTime;
+
+  previousError = error;
+
+  float P = Kp * error;
+  float I = Ki * integral;
+  float D = Kd * derivative;
+
+  float PID = P + I + D;
+
+  PID = constrain(PID, -35, 35);
+
+  // Adjust motor speeds
+  int adjustedLeft = constrain(
+    leftSpeed + int(PID), 0, 255
+  );
+
+  int adjustedRight = constrain(
+    rightSpeed - int(PID), 0, 255
+  );
+
+  // Drive forward
+  driveMotor(ENA, IN1, IN2, adjustedRight);
+  driveMotor(ENB, IN3, IN4, adjustedLeft);
+
+  // Serial Monitor
+  Serial.print("Right distance: ");
+  Serial.print(currentDistance);
+
+  Serial.print(" cm | PID: ");
+  Serial.println(PID);
+}
+
+// ======================================
+// SETUP
+// ======================================
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  stopMotors();
+
+  resetPID();
+}
+
+// ======================================
+// MAIN LOOP
+// ======================================
+void loop() {
+
+  wall_following();
+
+  delay(30);
+}
