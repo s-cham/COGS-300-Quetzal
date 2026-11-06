@@ -1,102 +1,59 @@
 
- // =========================
- // MOTOR PINS
- // =========================
-
 const int IN1 = 8;
 const int IN2 = 7;
 const int IN3 = 12;
 const int IN4 = 13;
 
-const int ENA = 9;    // RIGHT motor
-const int ENB = 11;   // LEFT motor
+const int ENA = 9;   // RIGHT motor
+const int ENB = 11;  // LEFT motor
 
-
-// =========================
-// ULTRASONIC PINS
-// =========================
-
+// =====================
+// ULTRASONIC SENSORS
+// =====================
 const int frontTrig = 3;
 const int frontEcho = 4;
+const int rightTrig = 6;
+const int rightEcho = 2;
 
-const int sideTrig = 6;   // RIGHT sensor
-const int sideEcho = 2;
-
-
-// =========================
-// MOTOR SPEED SETTINGS
-// =========================
-
+// =====================
+// MOTOR SPEEDS
+// =====================
 const int leftSpeed = 100;
 const int rightSpeed = 90;
 
-const int pivotSpeed = 130;
-const int minSteerSpeed = 40;
+const int turnSpeed = 130;
 
+// =====================
+// DISTANCE SETTINGS (cm)
+// =====================
+const float frontStopDistance = 15.0;
+const float rightTargetDistance = 10.0;
 
-// =========================
-// FRONT SENSOR SETTINGS
-// =========================
+// Minimum right clearance for a right turn
+const float rightClearDistance = 20.0;
 
-const float stopDistance = 20.0;
-const float resumeDistance = 25.0;
+const float maxWallDistance = 60.0;
 
-const int stopConfirm = 2;
-const int resumeConfirm = 2;
+// No steering correction between 8 and 12 cm
+const float deadZone = 2.0;
 
-const unsigned long stuckMs = 1500;
+// =====================
+// P-CONTROLLER
+// =====================
+const float Kp = 2.0;
 
+// Maximum motor-speed correction
+const int maxCorrection = 20;
 
-// =========================
-// SIDE SENSOR SETTINGS
-// =========================
+// =====================
+// TIMING (ms)
+// =====================
+const int reverseTime = 300;
+const int turnTime = 400;
 
-const float sideKeepDistance = 20.0; // setpoint distance; i.e., how close the robot will aim to stay to the wall
-const float sideDangerDistance = 12; // closer than this and the robot will turn away
-
-const float sideKp = 5.0;
-
-const int sideDangerConfirm = 2;
-
-
-// =========================
-// MANEUVER TIMING
-// =========================
-
-const int backMs = 400;
-const int turnMs = 350;
-
-
-// =========================
-// FORWARD RECOVERY SETTINGS
-// =========================
-
-const int recoverySpeedLeft = 100;
-const int recoverySpeedRight = 90;
-
-const unsigned long recoveryMs = 600;
-
-bool recovering = false;
-unsigned long recoveryStart = 0;
-
-
-// =========================
-// STATE VARIABLES
-// =========================
-
-bool stopped = false;
-
-int closeCount = 0;
-int clearCount = 0;
-int sideDangerCount = 0;
-
-unsigned long stoppedSince = 0;
-
-
-// =========================
+// =====================
 // READ ULTRASONIC DISTANCE
-// =========================
-
+// =====================
 float readDistance(int trig, int echo) {
 
   digitalWrite(trig, LOW);
@@ -104,30 +61,26 @@ float readDistance(int trig, int echo) {
 
   digitalWrite(trig, HIGH);
   delayMicroseconds(10);
-
   digitalWrite(trig, LOW);
 
-  long duration = pulseIn(echo, HIGH, 25000);
+  unsigned long duration =
+    pulseIn(echo, HIGH, 15000UL);
 
-  if (duration == 0) {
-    return -1;
-  }
+  if (duration == 0) return -1;
 
   float distance = duration * 0.0343 / 2.0;
 
-  if (distance < 2 || distance > 350) {
+  if (distance < 2 || distance > 250) {
     return -1;
   }
 
   return distance;
 }
 
-
-// =========================
+// =====================
 // MOTOR CONTROL
-// =========================
-
-void setMotor(int in1, int in2, int en, int speed) {
+// =====================
+void motor(int in1, int in2, int en, int speed) {
 
   speed = constrain(speed, -255, 255);
 
@@ -137,140 +90,61 @@ void setMotor(int in1, int in2, int en, int speed) {
   analogWrite(en, abs(speed));
 }
 
-
-// =========================
-// DRIVE
-// =========================
-
 void drive(int left, int right) {
 
-  // ENA = RIGHT motor
-  setMotor(IN1, IN2, ENA, right);
+  // ENA controls RIGHT motor
+  motor(IN1, IN2, ENA, right);
 
-  // ENB = LEFT motor
-  setMotor(IN3, IN4, ENB, left);
+  // ENB controls LEFT motor
+  motor(IN3, IN4, ENB, left);
 }
-
-
-// =========================
-// STOP
-// =========================
 
 void stopCar() {
   drive(0, 0);
 }
 
+// =====================
+// AVOID FRONT OBSTACLE
+// =====================
+void avoidObstacle() {
 
-// =========================
-// AVOID OBSTACLE
-// =========================
+  Serial.println("Obstacle ahead!");
 
-void avoid() {
-
-  Serial.println("Avoiding obstacle");
-
-  recovering = false;
-
-  // -------------------------
-  // STEP 1: REVERSE
-  // -------------------------
-
+  // Step 1: Reverse
   drive(-leftSpeed, -rightSpeed);
-
-  delay(backMs);
-
-  stopCar();
-  delay(80);
-
-
-  // -------------------------
-  // STEP 2: TURN LEFT
-  // -------------------------
-
-  Serial.println("Turning left");
-
-  drive(-pivotSpeed, pivotSpeed);
-
-  delay(turnMs);
+  delay(reverseTime);
 
   stopCar();
-  delay(80);
+  delay(50);
 
+  // Step 2: Check right side
+  float right =
+    readDistance(rightTrig, rightEcho);
 
-  // -------------------------
-  // STEP 3: CHECK FRONT
-  // -------------------------
+  // Step 3: Choose direction
+  if (right >= rightClearDistance) {
 
-  float frontCheck =
-    readDistance(frontTrig, frontEcho);
+    Serial.println("Turning RIGHT");
 
-  Serial.print("Front after left turn: ");
-  Serial.println(frontCheck);
-
-
-  // -------------------------
-  // STEP 4: TRY RIGHT
-  // IF LEFT IS STILL BLOCKED
-  // -------------------------
-
-  if (frontCheck < 0 ||
-      frontCheck < resumeDistance) {
-
-    Serial.println("Left blocked - trying right");
-
-    drive(pivotSpeed, -pivotSpeed);
-
-    delay(turnMs * 2);
-
-    stopCar();
-    delay(80);
-
-    frontCheck =
-      readDistance(frontTrig, frontEcho);
-
-    Serial.print("Front after right turn: ");
-    Serial.println(frontCheck);
-  }
-
-
-  // -------------------------
-  // STEP 5: RESET COUNTERS
-  // -------------------------
-
-  stopped = false;
-
-  closeCount = 0;
-  clearCount = 0;
-  sideDangerCount = 0;
-
-
-  // -------------------------
-  // STEP 6: START RECOVERY
-  // ONLY IF FRONT IS CLEAR
-  // -------------------------
-
-  if (frontCheck >= resumeDistance) {
-
-    recovering = true;
-    recoveryStart = millis();
-
-    Serial.println("Path clear - recovering forward");
+    drive(turnSpeed, -turnSpeed);
 
   } else {
 
-    recovering = false;
-    stopped = true;
-    stoppedSince = millis();
+    Serial.println("Turning LEFT");
 
-    Serial.println("No clear path - stopped");
+    drive(-turnSpeed, turnSpeed);
   }
+
+  // Step 4: Complete turn
+  delay(turnTime);
+
+  stopCar();
+  delay(50);
 }
 
-
-// =========================
+// =====================
 // SETUP
-// =========================
-
+// =====================
 void setup() {
 
   Serial.begin(9600);
@@ -286,11 +160,11 @@ void setup() {
   pinMode(frontTrig, OUTPUT);
   pinMode(frontEcho, INPUT);
 
-  pinMode(sideTrig, OUTPUT);
-  pinMode(sideEcho, INPUT);
+  pinMode(rightTrig, OUTPUT);
+  pinMode(rightEcho, INPUT);
 
   digitalWrite(frontTrig, LOW);
-  digitalWrite(sideTrig, LOW);
+  digitalWrite(rightTrig, LOW);
 
   stopCar();
 
@@ -299,220 +173,108 @@ void setup() {
   Serial.println("Robot Ready!");
 }
 
-
-// =========================
+// =====================
 // MAIN LOOP
-// =========================
-
+// =====================
 void loop() {
 
-  // -------------------------
-  // READ SENSORS
-  // -------------------------
-
+  // Read front sensor first
   float front =
     readDistance(frontTrig, frontEcho);
 
-  delay(30);
+  delay(20);
 
-  float side =
-    readDistance(sideTrig, sideEcho);
-
-
-  // -------------------------
-  // SERIAL MONITOR
-  // -------------------------
+  // Read right sensor
+  float right =
+    readDistance(rightTrig, rightEcho);
 
   Serial.print("Front: ");
   Serial.print(front);
 
-  Serial.print(" | Side: ");
-  Serial.print(side);
+  Serial.print(" | Right: ");
+  Serial.println(right);
 
-  if (recovering) {
-    Serial.println(" [RECOVERING]");
-  }
-  else if (stopped) {
-    Serial.println(" [STOPPED]");
-  }
-  else {
-    Serial.println(" [DRIVING]");
-  }
+  // =====================
+  // 1. FRONT OBSTACLE
+  // =====================
 
-
-  // =========================
-  // FORWARD RECOVERY
-  // =========================
-
-  if (recovering) {
-
-    // Front obstacle during recovery
-    if (front < 0 ||
-        front < stopDistance) {
-
-      stopCar();
-
-      recovering = false;
-
-      stopped = true;
-      stoppedSince = millis();
-
-      Serial.println("Recovery blocked - front");
-
-      return;
-    }
-
-
-    // Right wall too close during recovery
-    if (side >= 2 &&
-        side < sideDangerDistance) {
-
-      stopCar();
-
-      recovering = false;
-
-      Serial.println("Recovery blocked - right");
-
-      avoid();
-      return;
-    }
-
-
-    // Continue moving forward
-    if (millis() - recoveryStart < recoveryMs) {
-
-      drive(
-        recoverySpeedLeft,
-        recoverySpeedRight
-      );
-
-      Serial.println("Recovering forward");
-
-      delay(40);
-      return;
-    }
-
-
-    // Recovery finished
-    recovering = false;
-
-    Serial.println("Recovery complete");
-  }
-
-
-  // =========================
-  // FRONT STOP / RESUME
-  // =========================
-
-  bool obstacle =
-    (front >= 2 && front < stopDistance);
-
-  bool clear =
-    (front < 0 || front >= resumeDistance);
-
-
-  if (!stopped) {
-
-    closeCount =
-      obstacle ? closeCount + 1 : 0;
-
-    if (closeCount >= stopConfirm) {
-
-      stopped = true;
-
-      stoppedSince = millis();
-
-      closeCount = 0;
-      clearCount = 0;
-
-      stopCar();
-
-      Serial.println("Front obstacle - STOP");
-    }
-
-  }
-  else {
-
-    clearCount =
-      clear ? clearCount + 1 : 0;
-
-    if (clearCount >= resumeConfirm) {
-
-      stopped = false;
-
-      clearCount = 0;
-      closeCount = 0;
-
-      Serial.println("Front clear - RESUME");
-    }
-  }
-
-
-  // =========================
-  // STOPPED STATE
-  // =========================
-
-  if (stopped) {
+  // Stop if front reading is invalid
+  if (front < 0) {
 
     stopCar();
-
-    if (millis() - stoppedSince > stuckMs) {
-
-      avoid();
-    }
-
-    delay(40);
+    delay(30);
     return;
   }
 
+  // Front obstacle has highest priority
+  if (front < frontStopDistance) {
 
-  // =========================
-  // RIGHT SIDE DANGER
-  // =========================
-
-  bool sideDanger =
-    (side >= 2 &&
-     side < sideDangerDistance);
-
-  sideDangerCount =
-    sideDanger ? sideDangerCount + 1 : 0;
-
-
-  if (sideDangerCount >= sideDangerConfirm) {
-
-    Serial.println("Right wall too close");
-
-    avoid();
+    avoidObstacle();
     return;
   }
 
-
-  // =========================
-  // RIGHT WALL FOLLOWING
-  // =========================
+  // =====================
+  // 2. RIGHT WALL FOLLOWING
+  // =====================
 
   int left = leftSpeed;
-  int right = rightSpeed;
+  int rightMotor = rightSpeed;
 
-  if (side >= 2 &&
-      side < sideKeepDistance) {
+  if (right >= 2 && right <= maxWallDistance) {
 
-    float slowdown =
-      sideKp * (sideKeepDistance - side);
+    // Positive error = too far from wall
+    // Negative error = too close to wall
+    float error =
+      right - rightTargetDistance;
 
-    // Slow left wheel to steer left
-    left = max(
-      (int)(leftSpeed - slowdown),
-      minSteerSpeed
+    // Ignore small errors
+    if (abs(error) <= deadZone) {
+      error = 0;
+    }
+
+    // Proportional correction
+    int correction = constrain(
+      (int)(Kp * abs(error)),
+      0,
+      maxCorrection
     );
+
+    if (error < 0) {
+
+      // TOO CLOSE: steer LEFT
+      left = leftSpeed - correction;
+
+      Serial.println("Adjusting LEFT");
+
+    } else if (error > 0) {
+
+      // TOO FAR: steer RIGHT
+      rightMotor = rightSpeed - correction;
+
+      Serial.println("Adjusting RIGHT");
+
+    } else {
+
+      // At target distance: drive straight
+      left = leftSpeed;
+      rightMotor = rightSpeed;
+
+      Serial.println("Driving STRAIGHT");
+    }
+
+  } else {
+
+    // No reliable right wall reading
+    left = leftSpeed;
+    rightMotor = rightSpeed;
+
+    Serial.println("No right wall - straight");
   }
 
+  // =====================
+  // 3. DRIVE FORWARD
+  // =====================
+  drive(left, rightMotor);
 
-  // =========================
-  // DRIVE FORWARD
-  // =========================
-
-  drive(left, right);
-
-  delay(40);
+  delay(10);
 }
