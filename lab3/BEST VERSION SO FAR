@@ -1,0 +1,518 @@
+
+ // =========================
+ // MOTOR PINS
+ // =========================
+
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+
+const int ENA = 9;    // RIGHT motor
+const int ENB = 11;   // LEFT motor
+
+
+// =========================
+// ULTRASONIC PINS
+// =========================
+
+const int frontTrig = 3;
+const int frontEcho = 4;
+
+const int sideTrig = 6;   // RIGHT sensor
+const int sideEcho = 2;
+
+
+// =========================
+// MOTOR SPEED SETTINGS
+// =========================
+
+const int leftSpeed = 100;
+const int rightSpeed = 90;
+
+const int pivotSpeed = 130;
+const int minSteerSpeed = 40;
+
+
+// =========================
+// FRONT SENSOR SETTINGS
+// =========================
+
+const float stopDistance = 20.0;
+const float resumeDistance = 25.0;
+
+const int stopConfirm = 2;
+const int resumeConfirm = 2;
+
+const unsigned long stuckMs = 1500;
+
+
+// =========================
+// SIDE SENSOR SETTINGS
+// =========================
+
+const float sideKeepDistance = 20.0; // setpoint distance; i.e., how close the robot will aim to stay to the wall
+const float sideDangerDistance = 12; // closer than this and the robot will turn away
+
+const float sideKp = 5.0;
+
+const int sideDangerConfirm = 2;
+
+
+// =========================
+// MANEUVER TIMING
+// =========================
+
+const int backMs = 400;
+const int turnMs = 350;
+
+
+// =========================
+// FORWARD RECOVERY SETTINGS
+// =========================
+
+const int recoverySpeedLeft = 100;
+const int recoverySpeedRight = 90;
+
+const unsigned long recoveryMs = 600;
+
+bool recovering = false;
+unsigned long recoveryStart = 0;
+
+
+// =========================
+// STATE VARIABLES
+// =========================
+
+bool stopped = false;
+
+int closeCount = 0;
+int clearCount = 0;
+int sideDangerCount = 0;
+
+unsigned long stoppedSince = 0;
+
+
+// =========================
+// READ ULTRASONIC DISTANCE
+// =========================
+
+float readDistance(int trig, int echo) {
+
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trig, LOW);
+
+  long duration = pulseIn(echo, HIGH, 25000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2.0;
+
+  if (distance < 2 || distance > 350) {
+    return -1;
+  }
+
+  return distance;
+}
+
+
+// =========================
+// MOTOR CONTROL
+// =========================
+
+void setMotor(int in1, int in2, int en, int speed) {
+
+  speed = constrain(speed, -255, 255);
+
+  digitalWrite(in1, speed > 0 ? HIGH : LOW);
+  digitalWrite(in2, speed < 0 ? HIGH : LOW);
+
+  analogWrite(en, abs(speed));
+}
+
+
+// =========================
+// DRIVE
+// =========================
+
+void drive(int left, int right) {
+
+  // ENA = RIGHT motor
+  setMotor(IN1, IN2, ENA, right);
+
+  // ENB = LEFT motor
+  setMotor(IN3, IN4, ENB, left);
+}
+
+
+// =========================
+// STOP
+// =========================
+
+void stopCar() {
+  drive(0, 0);
+}
+
+
+// =========================
+// AVOID OBSTACLE
+// =========================
+
+void avoid() {
+
+  Serial.println("Avoiding obstacle");
+
+  recovering = false;
+
+  // -------------------------
+  // STEP 1: REVERSE
+  // -------------------------
+
+  drive(-leftSpeed, -rightSpeed);
+
+  delay(backMs);
+
+  stopCar();
+  delay(80);
+
+
+  // -------------------------
+  // STEP 2: TURN LEFT
+  // -------------------------
+
+  Serial.println("Turning left");
+
+  drive(-pivotSpeed, pivotSpeed);
+
+  delay(turnMs);
+
+  stopCar();
+  delay(80);
+
+
+  // -------------------------
+  // STEP 3: CHECK FRONT
+  // -------------------------
+
+  float frontCheck =
+    readDistance(frontTrig, frontEcho);
+
+  Serial.print("Front after left turn: ");
+  Serial.println(frontCheck);
+
+
+  // -------------------------
+  // STEP 4: TRY RIGHT
+  // IF LEFT IS STILL BLOCKED
+  // -------------------------
+
+  if (frontCheck < 0 ||
+      frontCheck < resumeDistance) {
+
+    Serial.println("Left blocked - trying right");
+
+    drive(pivotSpeed, -pivotSpeed);
+
+    delay(turnMs * 2);
+
+    stopCar();
+    delay(80);
+
+    frontCheck =
+      readDistance(frontTrig, frontEcho);
+
+    Serial.print("Front after right turn: ");
+    Serial.println(frontCheck);
+  }
+
+
+  // -------------------------
+  // STEP 5: RESET COUNTERS
+  // -------------------------
+
+  stopped = false;
+
+  closeCount = 0;
+  clearCount = 0;
+  sideDangerCount = 0;
+
+
+  // -------------------------
+  // STEP 6: START RECOVERY
+  // ONLY IF FRONT IS CLEAR
+  // -------------------------
+
+  if (frontCheck >= resumeDistance) {
+
+    recovering = true;
+    recoveryStart = millis();
+
+    Serial.println("Path clear - recovering forward");
+
+  } else {
+
+    recovering = false;
+    stopped = true;
+    stoppedSince = millis();
+
+    Serial.println("No clear path - stopped");
+  }
+}
+
+
+// =========================
+// SETUP
+// =========================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+
+  pinMode(sideTrig, OUTPUT);
+  pinMode(sideEcho, INPUT);
+
+  digitalWrite(frontTrig, LOW);
+  digitalWrite(sideTrig, LOW);
+
+  stopCar();
+
+  delay(1000);
+
+  Serial.println("Robot Ready!");
+}
+
+
+// =========================
+// MAIN LOOP
+// =========================
+
+void loop() {
+
+  // -------------------------
+  // READ SENSORS
+  // -------------------------
+
+  float front =
+    readDistance(frontTrig, frontEcho);
+
+  delay(30);
+
+  float side =
+    readDistance(sideTrig, sideEcho);
+
+
+  // -------------------------
+  // SERIAL MONITOR
+  // -------------------------
+
+  Serial.print("Front: ");
+  Serial.print(front);
+
+  Serial.print(" | Side: ");
+  Serial.print(side);
+
+  if (recovering) {
+    Serial.println(" [RECOVERING]");
+  }
+  else if (stopped) {
+    Serial.println(" [STOPPED]");
+  }
+  else {
+    Serial.println(" [DRIVING]");
+  }
+
+
+  // =========================
+  // FORWARD RECOVERY
+  // =========================
+
+  if (recovering) {
+
+    // Front obstacle during recovery
+    if (front < 0 ||
+        front < stopDistance) {
+
+      stopCar();
+
+      recovering = false;
+
+      stopped = true;
+      stoppedSince = millis();
+
+      Serial.println("Recovery blocked - front");
+
+      return;
+    }
+
+
+    // Right wall too close during recovery
+    if (side >= 2 &&
+        side < sideDangerDistance) {
+
+      stopCar();
+
+      recovering = false;
+
+      Serial.println("Recovery blocked - right");
+
+      avoid();
+      return;
+    }
+
+
+    // Continue moving forward
+    if (millis() - recoveryStart < recoveryMs) {
+
+      drive(
+        recoverySpeedLeft,
+        recoverySpeedRight
+      );
+
+      Serial.println("Recovering forward");
+
+      delay(40);
+      return;
+    }
+
+
+    // Recovery finished
+    recovering = false;
+
+    Serial.println("Recovery complete");
+  }
+
+
+  // =========================
+  // FRONT STOP / RESUME
+  // =========================
+
+  bool obstacle =
+    (front >= 2 && front < stopDistance);
+
+  bool clear =
+    (front < 0 || front >= resumeDistance);
+
+
+  if (!stopped) {
+
+    closeCount =
+      obstacle ? closeCount + 1 : 0;
+
+    if (closeCount >= stopConfirm) {
+
+      stopped = true;
+
+      stoppedSince = millis();
+
+      closeCount = 0;
+      clearCount = 0;
+
+      stopCar();
+
+      Serial.println("Front obstacle - STOP");
+    }
+
+  }
+  else {
+
+    clearCount =
+      clear ? clearCount + 1 : 0;
+
+    if (clearCount >= resumeConfirm) {
+
+      stopped = false;
+
+      clearCount = 0;
+      closeCount = 0;
+
+      Serial.println("Front clear - RESUME");
+    }
+  }
+
+
+  // =========================
+  // STOPPED STATE
+  // =========================
+
+  if (stopped) {
+
+    stopCar();
+
+    if (millis() - stoppedSince > stuckMs) {
+
+      avoid();
+    }
+
+    delay(40);
+    return;
+  }
+
+
+  // =========================
+  // RIGHT SIDE DANGER
+  // =========================
+
+  bool sideDanger =
+    (side >= 2 &&
+     side < sideDangerDistance);
+
+  sideDangerCount =
+    sideDanger ? sideDangerCount + 1 : 0;
+
+
+  if (sideDangerCount >= sideDangerConfirm) {
+
+    Serial.println("Right wall too close");
+
+    avoid();
+    return;
+  }
+
+
+  // =========================
+  // RIGHT WALL FOLLOWING
+  // =========================
+
+  int left = leftSpeed;
+  int right = rightSpeed;
+
+  if (side >= 2 &&
+      side < sideKeepDistance) {
+
+    float slowdown =
+      sideKp * (sideKeepDistance - side);
+
+    // Slow left wheel to steer left
+    left = max(
+      (int)(leftSpeed - slowdown),
+      minSteerSpeed
+    );
+  }
+
+
+  // =========================
+  // DRIVE FORWARD
+  // =========================
+
+  drive(left, right);
+
+  delay(40);
+}
