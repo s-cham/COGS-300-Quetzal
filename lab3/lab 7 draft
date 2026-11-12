@@ -1,0 +1,175 @@
+
+// =====================================
+// MOTOR PINS (L298N)
+// =====================================
+
+// Right motor
+const int IN1 = 8;
+const int IN2 = 7;
+const int ENA = 9;
+
+// Left motor
+const int IN3 = 12;
+const int IN4 = 13;
+const int ENB = 11;
+
+
+// =====================================
+// IR SENSOR PINS
+// =====================================
+
+// Physical sensor positions
+const int LEFT = 10;
+const int MIDDLE = A4;
+const int RIGHT = 5;
+
+// Sensor readings:
+// 0 = White tape
+// 1 = Ground
+
+
+// =====================================
+// MOTOR SPEED SETTINGS
+// =====================================
+
+int leftSpeed = 125;
+int rightSpeed = 100;
+
+int slowSpeed = 90;
+int turnSpeed = 130;
+
+
+// =====================================
+// LAST TURN DIRECTION
+// =====================================
+
+// 1 = Turn right
+// -1 = Turn left
+
+int lastTurn = 1;
+
+
+// =====================================
+// SETUP
+// =====================================
+
+void setup() {
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  pinMode(LEFT, INPUT);
+  pinMode(MIDDLE, INPUT);
+  pinMode(RIGHT, INPUT);
+
+  Serial.begin(9600);
+
+  // Both motors move forward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+
+// =====================================
+// MAIN LOOP
+// =====================================
+
+void loop() {
+
+  int left = digitalRead(LEFT);
+  int middle = digitalRead(MIDDLE);
+  int right = digitalRead(RIGHT);
+
+  // Print sensor readings
+  Serial.print("Left: ");
+  Serial.print(left);
+
+  Serial.print(" | Middle: ");
+  Serial.print(middle);
+
+  Serial.print(" | Right: ");
+  Serial.println(right);
+
+
+  // =====================================
+  // 000 = ALL SENSORS SEE WHITE
+  // DRIVE STRAIGHT
+  // =====================================
+
+  if (left == 0 && middle == 0 && right == 0) {
+
+    analogWrite(ENA, rightSpeed);
+    analogWrite(ENB, leftSpeed);
+  }
+
+
+  // =====================================
+  // 101 = MIDDLE SEES WHITE
+  // DRIVE STRAIGHT
+  // =====================================
+
+  else if (left == 1 && middle == 0 && right == 1) {
+
+    analogWrite(ENA, rightSpeed);
+    analogWrite(ENB, leftSpeed);
+  }
+
+
+  // =====================================
+  // 100 = LEFT SENSOR ON GROUND
+  // TURN RIGHT
+  // =====================================
+
+  else if (left == 1 && middle == 0 && right == 0) {
+
+    lastTurn = 1;
+
+    analogWrite(ENA, slowSpeed);
+    analogWrite(ENB, turnSpeed);
+  }
+
+
+  // =====================================
+  // 001 = RIGHT SENSOR ON GROUND
+  // TURN LEFT
+  // =====================================
+
+  else if (left == 0 && middle == 0 && right == 1) {
+
+    lastTurn = -1;
+
+    analogWrite(ENA, turnSpeed);
+    analogWrite(ENB, slowSpeed);
+  }
+
+
+  // =====================================
+  // OTHER COMBINATIONS
+  // CONTINUE PREVIOUS TURN
+  // =====================================
+
+  else {
+
+    if (lastTurn == 1) {
+
+      analogWrite(ENA, slowSpeed);
+      analogWrite(ENB, turnSpeed);
+    }
+
+    else {
+
+      analogWrite(ENA, turnSpeed);
+      analogWrite(ENB, slowSpeed);
+    }
+  }
+
+}
