@@ -32,11 +32,11 @@ const int RIGHT = 5;
 // MOTOR SPEED SETTINGS
 // =====================================
 
-int leftSpeed = 125;
-int rightSpeed = 100;
+int leftSpeed = 100;
+int rightSpeed = 75;
 
 int slowSpeed = 90;
-int turnSpeed = 130;
+int turnSpeed = 150;
 
 
 // =====================================
