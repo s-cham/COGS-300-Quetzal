@@ -1,175 +1,173 @@
+// Line follower (3 IR sensors), no Bayes. Built for sharp turns / hairpins.
+// All sensors read 0 over the line. Centered = L 1, M 0, R 1.
+//
+// Strategy:
+//  - Remember which side the line was last seen on (lastSide).
+//  - Slow down when an outer sensor sees the line (approaching a corner).
+//  - When the line is lost, optionally back up a bit, then COMMIT to a pivot
+//    toward lastSide for a minimum time so it can't re-lock onto the old segment.
+//  - Stop pivoting once a sensor finds the line after the minimum time.
 
-// =====================================
-// MOTOR PINS (L298N)
-// =====================================
+// ---------- Right motor ----------
+const int IN1 = 8, IN2 = 7, ENA = 9;
 
-// Right motor
-const int IN1 = 8;
-const int IN2 = 7;
-const int ENA = 9;
+// ---------- Left motor ----------
+const int IN3 = 12, IN4 = 13, ENB = 11;
 
-// Left motor
-const int IN3 = 12;
-const int IN4 = 13;
-const int ENB = 11;
+// ---------- IR sensors ----------
+const int LEFT = 10, MIDDLE = A4, RIGHT = 5;
 
+// ---------- Speeds ----------
+const int BASE_SPEED     = 130;   // straight, line centered
+const int APPROACH_SPEED = 100;   // outer sensor + middle on: corner coming
+const int TURN_SPEED     = 130;   // normal gentle correction
+const int SHARP_SPEED    = 170;   // committed pivot after losing the line
+const int REVERSE_SPEED  = 120;   // back-up before pivoting
 
-// =====================================
-// IR SENSOR PINS
-// =====================================
+// ---------- Pivot timing ----------
+const unsigned long REVERSE_MS   = 80;    // set to 0 to disable back-up
+const unsigned long MIN_PIVOT_MS = 120;   // ignore the line this long after losing it
+const unsigned long MAX_PIVOT_MS = 1500;  // no line found: flip direction and retry
 
-// Physical sensor positions
-const int LEFT = 10;
-const int MIDDLE = A4;
-const int RIGHT = 5;
+// ---------- Boost (start-of-move kick, clamped to 255) ----------
+const int PUMP_SPEED = 80;
+const unsigned long BOOST_MS = 30;
 
-// Sensor readings:
-// 0 = White tape
-// 1 = Ground
+int currentMove = 0;
+unsigned long moveStart = 0;
 
+const int LINE = 0;   // all sensors read 0 when over the line
 
-// =====================================
-// MOTOR SPEED SETTINGS
-// =====================================
-
-int leftSpeed = 100;
-int rightSpeed = 75;
-
-int slowSpeed = 90;
-int turnSpeed = 150;
-
-
-// =====================================
-// LAST TURN DIRECTION
-// =====================================
-
-// 1 = Turn right
-// -1 = Turn left
-
-int lastTurn = 1;
-
-
-// =====================================
-// SETUP
-// =====================================
+// ---------- State ----------
+int lastSide = -1;              // -1 = line last seen left, +1 = right
+bool pivoting = false;
+bool reversing = false;
+unsigned long phaseStart = 0;
 
 void setup() {
-
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
-
-  pinMode(LEFT, INPUT);
-  pinMode(MIDDLE, INPUT);
-  pinMode(RIGHT, INPUT);
-
-  Serial.begin(9600);
-
-  // Both motors move forward
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
+  Serial.begin(115200);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(LEFT, INPUT); pinMode(MIDDLE, INPUT); pinMode(RIGHT, INPUT);
+  stopMotors();
 }
-
-
-// =====================================
-// MAIN LOOP
-// =====================================
 
 void loop() {
+  int l = digitalRead(LEFT);
+  int m = digitalRead(MIDDLE);
+  int r = digitalRead(RIGHT);
 
-  int left = digitalRead(LEFT);
-  int middle = digitalRead(MIDDLE);
-  int right = digitalRead(RIGHT);
+  bool onL = (l == LINE);
+  bool onM = (m == LINE);
+  bool onR = (r == LINE);
+  bool lost = !onL && !onM && !onR;
 
-  // Print sensor readings
-  Serial.print("Left: ");
-  Serial.print(left);
-
-  Serial.print(" | Middle: ");
-  Serial.print(middle);
-
-  Serial.print(" | Right: ");
-  Serial.println(right);
-
-
-  // =====================================
-  // 000 = ALL SENSORS SEE WHITE
-  // DRIVE STRAIGHT
-  // =====================================
-
-  if (left == 0 && middle == 0 && right == 0) {
-
-    analogWrite(ENA, rightSpeed);
-    analogWrite(ENB, leftSpeed);
+  // Track last side only when not in a committed maneuver
+  if (!pivoting && !reversing) {
+    if (onL && !onR)      lastSide = -1;
+    else if (onR && !onL) lastSide = 1;
   }
 
-
-  // =====================================
-  // 101 = MIDDLE SEES WHITE
-  // DRIVE STRAIGHT
-  // =====================================
-
-  else if (left == 1 && middle == 0 && right == 1) {
-
-    analogWrite(ENA, rightSpeed);
-    analogWrite(ENB, leftSpeed);
+  // ---- Start a maneuver when the line is lost ----
+  if (lost && !pivoting && !reversing) {
+    phaseStart = millis();
+    if (REVERSE_MS > 0) reversing = true;
+    else                pivoting = true;
   }
 
-
-  // =====================================
-  // 100 = LEFT SENSOR ON GROUND
-  // TURN RIGHT
-  // =====================================
-
-  else if (left == 1 && middle == 0 && right == 0) {
-
-    lastTurn = 1;
-
-    analogWrite(ENA, slowSpeed);
-    analogWrite(ENB, turnSpeed);
+  // ---- Reverse phase (ignores sensors) ----
+  if (reversing) {
+    if (millis() - phaseStart < REVERSE_MS) {
+      int s = moveSpeed(5, REVERSE_SPEED);
+      driveMotor(ENB, IN3, IN4, -s);
+      driveMotor(ENA, IN1, IN2, -s);
+      return;
+    }
+    reversing = false;
+    pivoting = true;
+    phaseStart = millis();
   }
 
+  // ---- Committed pivot phase ----
+  if (pivoting) {
+    unsigned long t = millis() - phaseStart;
+    bool found = onL || onM || onR;
 
-  // =====================================
-  // 001 = RIGHT SENSOR ON GROUND
-  // TURN LEFT
-  // =====================================
-
-  else if (left == 0 && middle == 0 && right == 1) {
-
-    lastTurn = -1;
-
-    analogWrite(ENA, turnSpeed);
-    analogWrite(ENB, slowSpeed);
+    if (t > MIN_PIVOT_MS && found) {
+      pivoting = false;               // re-acquired; fall through to normal logic
+    } else {
+      if (t > MAX_PIVOT_MS) {         // wrong way / line really gone: try other side
+        lastSide = -lastSide;
+        phaseStart = millis();
+      }
+      int s = moveSpeed(lastSide == 1 ? 3 : 2, SHARP_SPEED);
+      if (lastSide == 1) {
+        driveMotor(ENB, IN3, IN4,  s);   // left forward
+        driveMotor(ENA, IN1, IN2, -s);   // right back
+      } else {
+        driveMotor(ENB, IN3, IN4, -s);   // left back
+        driveMotor(ENA, IN1, IN2,  s);   // right forward
+      }
+      return;
+    }
   }
 
-
-  // =====================================
-  // OTHER COMBINATIONS
-  // CONTINUE PREVIOUS TURN
-  // =====================================
-
+  // ---- Normal following ----
+  if (onM && !onL && !onR) {
+    // Centered -> straight
+    int s = moveSpeed(1, BASE_SPEED);
+    driveMotor(ENB, IN3, IN4, s);
+    driveMotor(ENA, IN1, IN2, s);
+  }
+  else if (onM && (onL || onR)) {
+    // Outer + middle: corner approaching -> creep forward slowly
+    int s = moveSpeed(4, APPROACH_SPEED);
+    driveMotor(ENB, IN3, IN4, s);
+    driveMotor(ENA, IN1, IN2, s);
+  }
   else {
-
-    if (lastTurn == 1) {
-
-      analogWrite(ENA, slowSpeed);
-      analogWrite(ENB, turnSpeed);
-    }
-
-    else {
-
-      analogWrite(ENA, turnSpeed);
-      analogWrite(ENB, slowSpeed);
+    // Gentle pivot toward the side that sees the line
+    int s = moveSpeed(lastSide == 1 ? 3 : 2, TURN_SPEED);
+    if (lastSide == 1) {
+      driveMotor(ENB, IN3, IN4,  s);
+      driveMotor(ENA, IN1, IN2, -s);
+    } else {
+      driveMotor(ENB, IN3, IN4, -s);
+      driveMotor(ENA, IN1, IN2,  s);
     }
   }
 
+  // Telemetry
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint >= 100) {
+    lastPrint = millis();
+    Serial.print("L:"); Serial.print(l);
+    Serial.print(" M:"); Serial.print(m);
+    Serial.print(" R:"); Serial.print(r);
+    Serial.print(" side:"); Serial.print(lastSide);
+    Serial.println();
+  }
 }
+
+// ---------- Movement helpers ----------
+// Clamped to 0..255 so analogWrite never overflows.
+int moveSpeed(int move, int normalSpeed) {
+  if (move != currentMove) { currentMove = move; moveStart = millis(); }
+  int s = (millis() - moveStart < BOOST_MS) ? normalSpeed + PUMP_SPEED : normalSpeed;
+  return constrain(s, 0, 255);
+}
+
+void stopMotors() {
+  currentMove = 0;
+  driveMotor(ENB, IN3, IN4, 0);
+  driveMotor(ENA, IN1, IN2, 0);
+}
+
+// ---------- Drive Motor Function (do not touch) ----------
+void driveMotor(int enPin, int inPin1, int inPin2, int speed) {
+  if (speed > 0)      { digitalWrite(inPin1, HIGH); digitalWrite(inPin2, LOW);  analogWrite(enPin,  speed); }
+  else if (speed < 0) { digitalWrite(inPin1, LOW);  digitalWrite(inPin2, HIGH); analogWrite(enPin, -speed); }
+  else                { digitalWrite(inPin1, LOW);  digitalWrite(inPin2, HIGH); analogWrite(enPin, 0); }
+}
+
