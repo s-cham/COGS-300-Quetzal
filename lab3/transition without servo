@@ -1,0 +1,376 @@
+// =====================================================
+// TOURNAMENT ROBOT: LINE -> WALL -> OBJECT
+// =====================================================
+
+// ---------- Motor pins ----------
+const int IN1 = 8,  IN2 = 7,  ENA = 9;    // RIGHT motor
+const int IN3 = 12, IN4 = 13, ENB = 11;   // LEFT motor
+
+// ---------- IR sensors (0 = over the line) ----------
+const int LEFT = 10, MIDDLE = A4, RIGHT = 5;
+const int LINE_VAL = 0;
+
+// ---------- Ultrasonic ----------
+const int frontTrig = 3, frontEcho = 4;
+const int sideTrig  = 6, sideEcho  = 2;
+
+// =====================================================
+// SECTION STATE MACHINE
+// =====================================================
+enum Section { SEC_LINE, SEC_WALL, SEC_OBJECT };
+Section section = SEC_LINE;
+
+// ---- Transition tuning ----
+const float WALL_ENTRY_DIST   = 30.0;  // cm: side wall closer than this = "wall seen"
+const float WALL_ENTRY_FRONT  = 30.0;  // cm: front wall closer than this = "wall seen"
+const int   WALL_CONFIRM_N    = 4;     // consecutive checks needed (filters noise / pivot sweeps)
+const unsigned long US_POLL_MS = 80;   // ultrasonic poll rate while line following
+
+const float NO_WALL_DIST      = 60.0;  // cm: right wall further than this (or no echo) = "no wall"
+const unsigned long WALL_END_MS = 2500; // no right wall for this long = wall section over
+
+// ---- Transition bookkeeping ----
+int wallConfirmCount = 0;
+unsigned long lastUsPoll = 0;
+unsigned long noWallSince = 0;
+float lastRightDist = -1;              // updated by wall_following()
+
+// =====================================================
+// LINE FOLLOWING SETTINGS
+// =====================================================
+const int BASE_SPEED     = 130;
+const int APPROACH_SPEED = 100;
+const int TURN_SPEED     = 130;
+const int SHARP_SPEED    = 170;
+const int REVERSE_SPEED  = 120;
+
+const unsigned long REVERSE_MS   = 80;
+const unsigned long MIN_PIVOT_MS = 120;
+const unsigned long MAX_PIVOT_MS = 1500;
+
+const int PUMP_SPEED = 80;
+const unsigned long BOOST_MS = 30;
+
+int currentMove = 0;
+unsigned long moveStart = 0;
+
+int lastSide = -1;                     // -1 = line last seen left, +1 = right
+bool pivoting = false;
+bool reversing = false;
+unsigned long phaseStart = 0;
+
+// =====================================================
+// WALL FOLLOWING SETTINGS
+// =====================================================
+int leftSpeed  = 100;
+int rightSpeed = 75;
+
+const int turnSpeed = 150;
+const int turnDuration = 600;
+
+const float set_point = 20.0;
+const float set_point_front = 15.0;
+const float rightDetectDistance = 25.0;
+
+const float Kp = 5.0, Ki = 1.0, Kd = 3.0;
+float integral = 0;
+float previousError = 0;
+unsigned long previousTime = 0;
+
+// =====================================================
+// OBJECT DETECTION SETTINGS
+// =====================================================
+const float OBJECT_STOP_DIST = 12.0;   // cm
+const int   OBJECT_SPEED     = 90;
+
+// =====================================================
+// MOTOR + SENSOR HELPERS
+// =====================================================
+void driveMotor(int enablePin, int pin1, int pin2, int speed) {
+  speed = constrain(speed, -255, 255);
+  if (speed > 0)      { digitalWrite(pin1, HIGH); digitalWrite(pin2, LOW); }
+  else if (speed < 0) { digitalWrite(pin1, LOW);  digitalWrite(pin2, HIGH); }
+  else                { digitalWrite(pin1, LOW);  digitalWrite(pin2, LOW); }
+  analogWrite(enablePin, abs(speed));
+}
+
+void stopMotors() {
+  currentMove = 0;
+  driveMotor(ENA, IN1, IN2, 0);
+  driveMotor(ENB, IN3, IN4, 0);
+}
+
+float readDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, 25000);
+  if (duration == 0) return -1;
+
+  float distance = duration * 0.0343 / 2.0;
+  if (distance < 2 || distance > 300) return -1;
+  return distance;
+}
+
+int moveSpeed(int move, int normalSpeed) {
+  if (move != currentMove) { currentMove = move; moveStart = millis(); }
+  int s = (millis() - moveStart < BOOST_MS) ? normalSpeed + PUMP_SPEED : normalSpeed;
+  return constrain(s, 0, 255);
+}
+
+void resetPID() {
+  integral = 0;
+  previousError = 0;
+  previousTime = millis();
+}
+
+// =====================================================
+// SECTION 1: LINE FOLLOWING
+// =====================================================
+void lineFollow() {
+  int l = digitalRead(LEFT);
+  int m = digitalRead(MIDDLE);
+  int r = digitalRead(RIGHT);
+
+  bool onL = (l == LINE_VAL);
+  bool onM = (m == LINE_VAL);
+  bool onR = (r == LINE_VAL);
+  bool lost = !onL && !onM && !onR;
+
+  if (!pivoting && !reversing) {
+    if (onL && !onR)      lastSide = -1;
+    else if (onR && !onL) lastSide = 1;
+  }
+
+  // Start a maneuver when the line is lost
+  if (lost && !pivoting && !reversing) {
+    phaseStart = millis();
+    if (REVERSE_MS > 0) reversing = true;
+    else                pivoting = true;
+  }
+
+  // Reverse phase
+  if (reversing) {
+    if (millis() - phaseStart < REVERSE_MS) {
+      int s = moveSpeed(5, REVERSE_SPEED);
+      driveMotor(ENB, IN3, IN4, -s);
+      driveMotor(ENA, IN1, IN2, -s);
+      return;
+    }
+    reversing = false;
+    pivoting = true;
+    phaseStart = millis();
+  }
+
+  // Committed pivot phase
+  if (pivoting) {
+    unsigned long t = millis() - phaseStart;
+    bool found = onL || onM || onR;
+
+    if (t > MIN_PIVOT_MS && found) {
+      pivoting = false;
+    } else {
+      if (t > MAX_PIVOT_MS) {
+        lastSide = -lastSide;
+        phaseStart = millis();
+      }
+      int s = moveSpeed(lastSide == 1 ? 3 : 2, SHARP_SPEED);
+      if (lastSide == 1) {
+        driveMotor(ENB, IN3, IN4,  s);
+        driveMotor(ENA, IN1, IN2, -s);
+      } else {
+        driveMotor(ENB, IN3, IN4, -s);
+        driveMotor(ENA, IN1, IN2,  s);
+      }
+      return;
+    }
+  }
+
+  // Normal following
+  if (onM && !onL && !onR) {
+    int s = moveSpeed(1, BASE_SPEED);
+    driveMotor(ENB, IN3, IN4, s);
+    driveMotor(ENA, IN1, IN2, s);
+  }
+  else if (onM && (onL || onR)) {
+    int s = moveSpeed(4, APPROACH_SPEED);
+    driveMotor(ENB, IN3, IN4, s);
+    driveMotor(ENA, IN1, IN2, s);
+  }
+  else {
+    int s = moveSpeed(lastSide == 1 ? 3 : 2, TURN_SPEED);
+    if (lastSide == 1) {
+      driveMotor(ENB, IN3, IN4,  s);
+      driveMotor(ENA, IN1, IN2, -s);
+    } else {
+      driveMotor(ENB, IN3, IN4, -s);
+      driveMotor(ENA, IN1, IN2,  s);
+    }
+  }
+}
+
+// TRANSITION: LINE -> WALL
+// Wall must be seen on several consecutive polls (side OR front) before we switch.
+bool checkEnterWallSection() {
+  if (millis() - lastUsPoll < US_POLL_MS) return false;
+  lastUsPoll = millis();
+
+  float side  = readDistance(sideTrig, sideEcho);
+  float front = readDistance(frontTrig, frontEcho);
+
+  bool sideWall  = (side  > 0 && side  < WALL_ENTRY_DIST);
+  bool frontWall = (front > 0 && front < WALL_ENTRY_FRONT);
+
+  if (sideWall || frontWall) wallConfirmCount++;
+  else                       wallConfirmCount = 0;
+
+  return wallConfirmCount >= WALL_CONFIRM_N;
+}
+
+// =====================================================
+// SECTION 2: WALL FOLLOWING (right wall, PID)
+// =====================================================
+void turnLeft() {
+  driveMotor(ENA, IN1, IN2, turnSpeed);
+  driveMotor(ENB, IN3, IN4, -turnSpeed);
+  delay(turnDuration);
+  stopMotors();
+  resetPID();
+}
+
+void turnRight() {
+  driveMotor(ENA, IN1, IN2, -turnSpeed);
+  driveMotor(ENB, IN3, IN4, turnSpeed);
+  delay(turnDuration);
+  stopMotors();
+  resetPID();
+}
+
+void wall_following() {
+  float frontDistance = readDistance(frontTrig, frontEcho);
+
+  // Front obstacle: choose turn direction
+  if (frontDistance > 0 && frontDistance <= set_point_front) {
+    float rightDistance = readDistance(sideTrig, sideEcho);
+    lastRightDist = rightDistance;
+    if (rightDistance > 0 && rightDistance <= rightDetectDistance) turnLeft();
+    else                                                           turnRight();
+    return;
+  }
+
+  float currentDistance = readDistance(sideTrig, sideEcho);
+  lastRightDist = currentDistance;
+
+  // No right wall: drive straight
+  if (currentDistance < 0) {
+    driveMotor(ENA, IN1, IN2, rightSpeed);
+    driveMotor(ENB, IN3, IN4, leftSpeed);
+    resetPID();
+    return;
+  }
+
+  unsigned long currentTime = millis();
+  float deltaTime = (currentTime - previousTime) / 1000.0;
+  if (deltaTime <= 0) deltaTime = 0.02;
+  previousTime = currentTime;
+
+  float error = currentDistance - set_point;
+
+  integral += error * deltaTime;
+  integral = constrain(integral, -50.0, 50.0);
+  float derivative = (error - previousError) / deltaTime;
+  previousError = error;
+
+  float PID = Kp * error + Ki * integral + Kd * derivative;
+  PID = constrain(PID, -35, 35);
+
+  int adjustedLeft  = constrain(leftSpeed  + int(PID), 0, 255);
+  int adjustedRight = constrain(rightSpeed - int(PID), 0, 255);
+
+  driveMotor(ENA, IN1, IN2, adjustedRight);
+  driveMotor(ENB, IN3, IN4, adjustedLeft);
+}
+
+// TRANSITION: WALL -> OBJECT
+// Right wall absent (no echo or very far) continuously for WALL_END_MS.
+bool checkExitWallSection() {
+  bool noWall = (lastRightDist < 0 || lastRightDist > NO_WALL_DIST);
+  if (!noWall) { noWallSince = 0; return false; }
+  if (noWallSince == 0) noWallSince = millis();
+  return (millis() - noWallSince >= WALL_END_MS);
+}
+
+// =====================================================
+// SECTION 3: OBJECT DETECTION (starter stub)
+// =====================================================
+void objectDetection() {
+  float front = readDistance(frontTrig, frontEcho);
+
+  if (front > 0 && front <= OBJECT_STOP_DIST) {
+    stopMotors();
+    Serial.println("OBJECT DETECTED");
+    // TODO: your object task goes here (push it, go around it, signal, etc.)
+  } else {
+    driveMotor(ENA, IN1, IN2, OBJECT_SPEED);
+    driveMotor(ENB, IN3, IN4, OBJECT_SPEED);
+  }
+  delay(30);
+}
+
+// =====================================================
+// SECTION CHANGE HELPER
+// =====================================================
+void enterSection(Section s) {
+  stopMotors();
+  section = s;
+  pivoting = false;
+  reversing = false;
+  wallConfirmCount = 0;
+  noWallSince = 0;
+  lastRightDist = -1;
+  resetPID();
+
+  if (s == SEC_LINE)   Serial.println(">>> SECTION: LINE FOLLOWING");
+  if (s == SEC_WALL)   Serial.println(">>> SECTION: WALL FOLLOWING");
+  if (s == SEC_OBJECT) Serial.println(">>> SECTION: OBJECT DETECTION");
+  delay(200);   // brief settle pause at each transition
+}
+
+// =====================================================
+// SETUP / LOOP
+// =====================================================
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+  pinMode(LEFT, INPUT); pinMode(MIDDLE, INPUT); pinMode(RIGHT, INPUT);
+
+  pinMode(frontTrig, OUTPUT); pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);  pinMode(sideEcho, INPUT);
+
+  enterSection(SEC_LINE);
+}
+
+void loop() {
+  switch (section) {
+
+    case SEC_LINE:
+      lineFollow();
+      if (checkEnterWallSection()) enterSection(SEC_WALL);
+      break;
+
+    case SEC_WALL:
+      wall_following();
+      if (checkExitWallSection()) enterSection(SEC_OBJECT);
+      delay(30);
+      break;
+
+    case SEC_OBJECT:
+      objectDetection();
+      break;
+  }
+}
