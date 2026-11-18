@@ -1,0 +1,23 @@
+#include <Servo.h>
+// correct configuration for servo movement
+
+Servo myServo;            
+const int servoPin = A0;  // Servo signal wire connected to A0
+
+void setup() {
+  myServo.attach(servoPin);  // Attaches the servo on pin A0
+}
+
+void loop() {
+  // Sweep from 0 to 180 degrees (left to right)
+  for (int pos = 0; pos <= 180; pos += 1) { 
+    myServo.write(pos);              
+    delay(15);                       
+  }
+  
+  // Sweep back from 180 to 0 degrees (right to left)
+  for (int pos = 180; pos >= 0; pos -= 1) { 
+    myServo.write(pos);              
+    delay(15);                       
+  }
+}
