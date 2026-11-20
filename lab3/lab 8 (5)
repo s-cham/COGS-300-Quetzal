@@ -1,0 +1,466 @@
+// ======================================
+// OBJECT SWEEP + (kept) WALL FOLLOWING
+// Original pins, no Servo library
+// ======================================
+
+// ---------- Motor pins ----------
+const int IN1 = 8;
+const int IN2 = 7;
+const int IN3 = 12;
+const int IN4 = 13;
+const int ENA = 9;    // RIGHT MOTOR
+const int ENB = 11;   // LEFT MOTOR
+
+// ---------- Ultrasonic ----------
+const int frontTrig = 3;   // front sensor is mounted ON THE SERVO
+const int frontEcho = 4;
+const int sideTrig = 6;
+const int sideEcho = 2;
+
+// ---------- Servo (manual pulses, no library) ----------
+const int servoPin = A0;
+const int SERVO_CENTER = 90;
+const int SERVO_MIN_US = 500;     // pulse width at 0 deg
+const int SERVO_MAX_US = 2400;    // pulse width at 180 deg
+
+// ---------- Motor speeds ----------
+int leftSpeed = 150;
+int rightSpeed = 125;
+const int turnSpeed = 200;
+const int turnDuration = 600;
+
+// ---------- Wall following settings ----------
+const float set_point = 20.0;
+const float set_point_front = 15.0;
+const float rightDetectDistance = 25.0;
+const float Kp = 5.0, Ki = 1.0, Kd = 3.0;
+float integral = 0;
+float previousError = 0;
+unsigned long previousTime = 0;
+
+// ---------- Sweep settings ----------
+const int   SWEEP_STEP       = 5;                      // degrees per reading
+const int   SWEEP_N          = (180 / SWEEP_STEP) + 1; // 37 slots
+const int   SERVO_MOVE_MS    = 70;                     // time for servo to reach each angle
+const float MAX_OBJECT_RANGE = 120.0;                  // cm, ignore anything farther
+const float CLUSTER_TOL      = 3.0;                    // cm, same-object tolerance
+const float EDGE_JUMP_CM        = 8.0;   // distance jump between neighbouring angles = new object
+const float MIN_OBJECT_WIDTH_CM = 2.0;   // ignore anything narrower (noise)
+
+const int LEFT_PIVOT  = 150;   // left wheel is weaker, so it gets full power
+const int RIGHT_PIVOT = 120;   // right wheel is stronger, so trim it
+const float RIGHT_KICK_SCALE = 0.8;   // same trim for the start kick
+
+// If the robot turns AWAY from the object, flip this.
+const bool HIGH_ANGLE_IS_LEFT = true;
+
+const float TURN_MS_PER_DEG  = 7.0;    // CALIBRATE: ms of pivot per degree at turnSpeed
+const int   MIN_TURN_DEG     = 3;
+const float OBJECT_STOP_DIST = 12.0;   // cm
+const int OBJECT_LEFT  = 120;   // keeps the same 100:75 ratio as your wall code
+const int OBJECT_RIGHT = 90;    // raise both together if it still stalls
+const int KICK_SPEED   = 230;   // brief burst to break static friction
+const unsigned long KICK_MS = 40;
+bool driveStarted = false;
+const unsigned long DRIVE_TIMEOUT_MS = 10000;  // safety: give up and re-sweep after this long
+const unsigned long LOST_MS = 1500;            // object not seen this long -> re-sweep
+const int STOP_CONFIRM_N = 2;                  // close readings in a row to count as "reached"
+int closeCount = 0;
+unsigned long lostSince = 0;
+
+enum ObjState { OBJ_SWEEP, OBJ_TURN, OBJ_DRIVE, OBJ_DONE };
+ObjState objState = OBJ_SWEEP;
+
+float sweepDist[37];
+int   targetOffsetDeg = 0;             // + = left, - = right
+unsigned long driveStart = 0;
+
+// ======================================
+// MOTOR CONTROL
+// ======================================
+void driveMotor(int enablePin, int pin1, int pin2, int speed) {
+  speed = constrain(speed, -255, 255);
+  if (speed > 0)      { digitalWrite(pin1, HIGH); digitalWrite(pin2, LOW); }
+  else if (speed < 0) { digitalWrite(pin1, LOW);  digitalWrite(pin2, HIGH); }
+  else                { digitalWrite(pin1, LOW);  digitalWrite(pin2, LOW); }
+  analogWrite(enablePin, abs(speed));
+}
+
+void stopMotors() {
+  driveMotor(ENA, IN1, IN2, 0);
+  driveMotor(ENB, IN3, IN4, 0);
+}
+
+void startMove(int l, int r) {
+  int kl = (l > 0) ? KICK_SPEED : -KICK_SPEED;
+  int kr = (int)((r > 0 ? KICK_SPEED : -KICK_SPEED) * RIGHT_KICK_SCALE);
+  driveMotor(ENA, IN1, IN2, kr);
+  driveMotor(ENB, IN3, IN4, kl);
+  delay(KICK_MS);
+  driveMotor(ENA, IN1, IN2, r);
+  driveMotor(ENB, IN3, IN4, l);
+}
+
+void resetPID() {
+  integral = 0;
+  previousError = 0;
+  previousTime = millis();
+}
+
+// ======================================
+// SERVO (manual PWM on A0)
+// ======================================
+void servoPulse(int angle) {
+  angle = constrain(angle, 0, 180);
+  int us = map(angle, 0, 180, SERVO_MIN_US, SERVO_MAX_US);
+  digitalWrite(servoPin, HIGH);
+  delayMicroseconds(us);
+  digitalWrite(servoPin, LOW);
+}
+
+// Move to angle and hold it for 'ms' (sends a pulse every ~20 ms)
+void moveServo(int angle, unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    servoPulse(angle);
+    delay(18);
+  }
+}
+
+// ======================================
+// ULTRASONIC
+// ======================================
+float readDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, 25000);
+  if (duration == 0) return -1;
+
+  float distance = duration * 0.0343 / 2.0;
+  if (distance < 2 || distance > 300) return -1;
+  return distance;
+}
+
+// Median of 3 pings; -1 if fewer than 2 valid
+float readStable(int trigPin, int echoPin) {
+  float v[3]; int n = 0;
+  for (int i = 0; i < 3; i++) {
+    float d = readDistance(trigPin, echoPin);
+    if (d > 0) v[n++] = d;
+    delay(5);
+  }
+  if (n < 2) return -1;
+  if (n == 2) return (v[0] + v[1]) / 2.0;
+  if (v[0] > v[1]) { float t = v[0]; v[0] = v[1]; v[1] = t; }
+  if (v[1] > v[2]) { float t = v[1]; v[1] = v[2]; v[2] = t; }
+  if (v[0] > v[1]) { float t = v[0]; v[0] = v[1]; v[1] = t; }
+  return v[1];
+}
+
+// ======================================
+// TURNS (used by wall following)
+// ======================================
+void turnLeft() {
+  Serial.println("TURNING LEFT");
+  driveMotor(ENA, IN1, IN2, turnSpeed);
+  driveMotor(ENB, IN3, IN4, -turnSpeed);
+  delay(turnDuration);
+  stopMotors();
+  resetPID();
+}
+
+void turnRight() {
+  Serial.println("TURNING RIGHT");
+  driveMotor(ENA, IN1, IN2, -turnSpeed);
+  driveMotor(ENB, IN3, IN4, turnSpeed);
+  delay(turnDuration);
+  stopMotors();
+  resetPID();
+}
+
+// ======================================
+// WALL FOLLOWING (unchanged, not called in the sweep arena)
+// ======================================
+void wall_following() {
+  float frontDistance = readDistance(frontTrig, frontEcho);
+
+  if (frontDistance > 0 && frontDistance <= set_point_front) {
+    Serial.println("FRONT OBSTACLE!");
+    float rightDistance = readDistance(sideTrig, sideEcho);
+    if (rightDistance > 0 && rightDistance <= rightDetectDistance) {
+      Serial.println("RIGHT SIDE BLOCKED");
+      turnLeft();
+    } else {
+      Serial.println("RIGHT SIDE CLEAR");
+      turnRight();
+    }
+    return;
+  }
+
+  float currentDistance = readDistance(sideTrig, sideEcho);
+
+  if (currentDistance < 0) {
+    driveMotor(ENA, IN1, IN2, rightSpeed);
+    driveMotor(ENB, IN3, IN4, leftSpeed);
+    resetPID();
+    Serial.println("No right wall - driving straight");
+    return;
+  }
+
+  unsigned long currentTime = millis();
+  float deltaTime = (currentTime - previousTime) / 1000.0;
+  if (deltaTime <= 0) deltaTime = 0.02;
+  previousTime = currentTime;
+
+  float error = currentDistance - set_point;
+  integral += error * deltaTime;
+  integral = constrain(integral, -50.0, 50.0);
+  float derivative = (error - previousError) / deltaTime;
+  previousError = error;
+
+  float PID = Kp * error + Ki * integral + Kd * derivative;
+  PID = constrain(PID, -35, 35);
+
+  int adjustedLeft  = constrain(leftSpeed  + int(PID), 0, 255);
+  int adjustedRight = constrain(rightSpeed - int(PID), 0, 255);
+
+  driveMotor(ENA, IN1, IN2, adjustedRight);
+  driveMotor(ENB, IN3, IN4, adjustedLeft);
+
+  Serial.print("Right distance: ");
+  Serial.print(currentDistance);
+  Serial.print(" cm | PID: ");
+  Serial.println(PID);
+}
+
+// ======================================
+// OBJECT SWEEP
+// ======================================
+void recordReading(int angle, float d) {
+  int i = angle / SWEEP_STEP;
+  if (d > 0 && d <= MAX_OBJECT_RANGE && (sweepDist[i] < 0 || d < sweepDist[i])) {
+    sweepDist[i] = d;
+  }
+}
+
+// Sweep 0 -> 180 and back, keeping the closest reading per angle
+void doSweep() {
+  for (int i = 0; i < SWEEP_N; i++) sweepDist[i] = -1;
+
+  moveServo(0, 500);                              // travel to start
+
+  for (int a = 0; a <= 180; a += SWEEP_STEP) {    // forward pass
+    moveServo(a, SERVO_MOVE_MS);
+    recordReading(a, readStable(frontTrig, frontEcho));
+  }
+  for (int a = 180; a >= 0; a -= SWEEP_STEP) {    // back pass
+    moveServo(a, SERVO_MOVE_MS);
+    recordReading(a, readStable(frontTrig, frontEcho));
+  }
+
+  moveServo(SERVO_CENTER, 400);
+}
+
+// Returns center angle of the closest object (servo degrees), or -1 if none
+int findClosestObjectAngle(float &minDistOut) {
+  float minD = 1000;
+  for (int i = 0; i < SWEEP_N; i++) {
+    if (sweepDist[i] > 0 && sweepDist[i] < minD) minD = sweepDist[i];
+  }
+  if (minD >= 1000) return -1;
+
+  long sum = 0; int n = 0;
+  for (int i = 0; i < SWEEP_N; i++) {
+    if (sweepDist[i] > 0 && sweepDist[i] <= minD + CLUSTER_TOL) {
+      sum += (long)i * SWEEP_STEP;
+      n++;
+    }
+  }
+  minDistOut = minD;
+  return (int)(sum / n);
+}
+
+// Splits the sweep into separate objects and returns the center angle (servo degrees)
+// of the one with the largest estimated physical width. Returns -1 if none found.
+int findLargestObjectAngle(float &distOut, float &widthOut) {
+  float bestW = 0;
+  int bestCenter = -1;
+  float bestD = 0;
+
+  int i = 0;
+  while (i < SWEEP_N) {
+    if (sweepDist[i] <= 0) { i++; continue; }
+
+    // Start a new object at i and extend while neighbours have similar distance
+    int start = i;
+    float sum = sweepDist[i];
+    int n = 1;
+    while (i + 1 < SWEEP_N && sweepDist[i + 1] > 0 &&
+           fabs(sweepDist[i + 1] - sweepDist[i]) < EDGE_JUMP_CM) {
+      i++;
+      sum += sweepDist[i];
+      n++;
+    }
+    int end = i;
+    i++;
+
+    float avgD  = sum / n;
+    float angW  = n * SWEEP_STEP;                         // angular width in degrees
+    float width = 2.0 * avgD * tan(angW * PI / 360.0);    // physical width in cm
+    int center  = ((start + end) * SWEEP_STEP) / 2;
+
+    Serial.print("  object @ "); Serial.print(center);
+    Serial.print(" deg, dist "); Serial.print(avgD);
+    Serial.print(" cm, width "); Serial.print(width); Serial.println(" cm");
+
+    if (width >= MIN_OBJECT_WIDTH_CM && width > bestW) {
+      bestW = width;
+      bestCenter = center;
+      bestD = avgD;
+    }
+  }
+
+  distOut = bestD;
+  widthOut = bestW;
+  return bestCenter;
+}
+
+void pivotByDegrees(int offsetDeg) {
+  int deg = abs(offsetDeg);
+  if (deg < MIN_TURN_DEG) return;
+
+  Serial.print("PIVOT "); Serial.print(offsetDeg); Serial.println(" deg");
+
+  if (offsetDeg > 0) startMove(-LEFT_PIVOT,  RIGHT_PIVOT);   // pivot left
+  else               startMove( LEFT_PIVOT, -RIGHT_PIVOT);   // pivot right
+
+  delay((unsigned long)(deg * TURN_MS_PER_DEG));
+  stopMotors();
+  delay(150);
+}
+
+void objectSweepTask() {
+  switch (objState) {
+
+    case OBJ_SWEEP: {
+      stopMotors();
+      doSweep();
+
+      float minD = -1, objW = 0;
+      Serial.println("Objects found:");
+      int angle = findLargestObjectAngle(minD, objW);
+
+      if (angle < 0) {
+        Serial.println("No object in range - rotating 45 deg right, re-sweeping");
+        pivotByDegrees(-45);
+        return;
+      }
+
+      int offset = angle - SERVO_CENTER;
+      if (!HIGH_ANGLE_IS_LEFT) offset = -offset;
+      targetOffsetDeg = offset;
+
+      Serial.print("Closest object: servo angle "); Serial.print(angle);
+      Serial.print(" ("); Serial.print(abs(offset));
+      Serial.print(offset > 0 ? " deg LEFT" : " deg RIGHT");
+      Serial.print("), distance "); Serial.print(minD); Serial.println(" cm");
+
+      objState = OBJ_TURN;
+      break;
+    }
+
+    case OBJ_TURN:
+      pivotByDegrees(targetOffsetDeg);
+      driveStart = millis();
+      driveStarted = false;
+      closeCount = 0;
+      lostSince = 0;
+      objState = OBJ_DRIVE;
+      Serial.println("-> DRIVE");
+      break;
+
+    case OBJ_DRIVE: {
+      servoPulse(SERVO_CENTER);
+      float front = readDistance(frontTrig, frontEcho);
+
+      // Reached the object?
+      if (front > 0 && front <= OBJECT_STOP_DIST) closeCount++;
+      else                                        closeCount = 0;
+
+      if (closeCount >= STOP_CONFIRM_N) {
+        stopMotors();
+        Serial.println("REACHED OBJECT");
+        objState = OBJ_DONE;
+        return;
+      }
+
+      // Lost the object? (no valid reading for a while) -> re-sweep
+      if (front < 0 || front > MAX_OBJECT_RANGE + 20) {
+        if (lostSince == 0) lostSince = millis();
+        if (millis() - lostSince > LOST_MS) {
+          stopMotors();
+          Serial.println("Lost object - re-sweeping");
+          objState = OBJ_SWEEP;
+          return;
+        }
+      } else {
+        lostSince = 0;
+      }
+
+      // Safety timeout
+      if (millis() - driveStart > DRIVE_TIMEOUT_MS) {
+        stopMotors();
+        Serial.println("Drive timeout - re-sweeping");
+        objState = OBJ_SWEEP;
+        return;
+      }
+
+      if (!driveStarted) {
+        startMove(OBJECT_LEFT, OBJECT_RIGHT);
+        driveStarted = true;
+      } else {
+        driveMotor(ENA, IN1, IN2, OBJECT_RIGHT);
+        driveMotor(ENB, IN3, IN4, OBJECT_LEFT);
+      }
+      delay(20);
+      break;
+    }
+
+    case OBJ_DONE:
+      stopMotors();
+      servoPulse(SERVO_CENTER);
+      delay(20);
+      break;
+  }
+}
+
+// ======================================
+// SETUP / LOOP
+// ======================================
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT); pinMode(frontEcho, INPUT);
+  pinMode(sideTrig, OUTPUT);  pinMode(sideEcho, INPUT);
+
+  pinMode(servoPin, OUTPUT);
+  digitalWrite(servoPin, LOW);
+
+  stopMotors();
+  resetPID();
+  moveServo(SERVO_CENTER, 500);
+  Serial.println("OBJECT SWEEP START");
+}
+
+void loop() {
+  objectSweepTask();     // no walls or lines in this arena
+  // wall_following();   // swap in for the wall section
+}
